@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+
+# Environment files (contain secrets)
+.env.development
+.env.production
+.env.development.local
+.env.production.local
+.env.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Database
+dump.rdb
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Excel backups
+~$*.xlsx
+~$*.xls
+
+# Plans
+/plans
