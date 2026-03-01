@@ -3,16 +3,17 @@ node_modules/
 
 # Build output
 dist/
+build/
+out/
 *.js
 *.js.map
 *.d.ts
+*.tsbuildinfo
 
 # Environment files (contain secrets)
-.env.development
-.env.production
-.env.development.local
-.env.production.local
-.env.local
+.env
+.env.*
+!.env.example
 
 # Logs
 logs/
@@ -37,6 +38,8 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+test-output.txt
+*.test-output.txt
 
 # Temporary files
 *.tmp
@@ -47,5 +50,20 @@ coverage/
 ~$*.xlsx
 ~$*.xls
 
-# Plans
+# Caches
+.eslintcache
+.biome/
+.turbo/
+
+# Package files
+*.tgz
+*.tar.gz
+
+# Deployment
+.vercel/
+.netlify/
+.serverless/
+
+# Other
 /plans
+/data

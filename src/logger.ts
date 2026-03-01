@@ -5,6 +5,7 @@
 
 import { insertAuditLog } from './db.js';
 import type { EventType } from './types.js';
+import { getSafeFilename, isDevelopment, redactEmail } from './utils/security.js';
 
 // ============================================================================
 // Logger Interface
@@ -35,6 +36,10 @@ export interface Logger {
     error: Error | string,
     additionalData?: Record<string, unknown>
   ): Promise<void>;
+  /** Log informational message */
+  info(message: string, data?: Record<string, unknown>): Promise<void>;
+  /** Log warning message */
+  warn(message: string, data?: Record<string, unknown>): Promise<void>;
 }
 
 // ============================================================================
@@ -70,10 +75,12 @@ class AuditLogger implements Logger {
 
   /**
    * Log start of Excel import operation
+   * Only logs filename, not full path (security)
    */
   async logExcelImportStart(filePath: string, totalRows: number): Promise<void> {
+    const safeFilename = getSafeFilename(filePath);
     await this.logEvent('EXCEL_IMPORT_START', {
-      filePath,
+      fileName: safeFilename,
       totalRows,
     });
   }
@@ -82,9 +89,13 @@ class AuditLogger implements Logger {
    * Log successful validation of a single Excel row
    */
   async logExcelImportRowValid(row: number, data: Record<string, unknown>): Promise<void> {
+    const safeData = { ...data };
+    if (typeof safeData.email === 'string') {
+      safeData.email = redactEmail(safeData.email);
+    }
     await this.logEvent('EXCEL_IMPORT_ROW_VALID', {
       row,
-      data,
+      data: safeData,
     });
   }
 
@@ -96,10 +107,14 @@ class AuditLogger implements Logger {
     error: string,
     data: Record<string, unknown>
   ): Promise<void> {
+    const safeData = { ...data };
+    if (typeof safeData.email === 'string') {
+      safeData.email = redactEmail(safeData.email);
+    }
     await this.logEvent('EXCEL_IMPORT_ROW_INVALID', {
       row,
       error,
-      data,
+      data: safeData,
     });
   }
 
@@ -118,30 +133,33 @@ class AuditLogger implements Logger {
 
   /**
    * Log MyEmailVerifier API request
+   * Email is redacted for privacy
    */
   async logApiVerifierRequest(email: string): Promise<void> {
     await this.logEvent('API_VERIFIER_REQ', {
-      email,
+      email: redactEmail(email),
       api: 'MyEmailVerifier',
     });
   }
 
   /**
    * Log MyEmailVerifier API response
+   * Email is redacted for privacy
    */
   async logApiVerifierResponse(email: string, response: Record<string, unknown>): Promise<void> {
     await this.logEvent('API_VERIFIER_RES', {
-      email,
+      email: redactEmail(email),
       response,
     });
   }
 
   /**
    * Log AWS SES send request
+   * Email is redacted for privacy
    */
   async logAwsSesRequest(email: string, params: Record<string, unknown>): Promise<void> {
     await this.logEvent('AWS_SES_REQ', {
-      email,
+      email: redactEmail(email),
       params: {
         ...params,
         // Exclude sensitive data if any
@@ -153,20 +171,22 @@ class AuditLogger implements Logger {
 
   /**
    * Log AWS SES send response
+   * Email is redacted for privacy
    */
   async logAwsSesResponse(email: string, messageId: string): Promise<void> {
     await this.logEvent('AWS_SES_RES', {
-      email,
+      email: redactEmail(email),
       messageId,
     });
   }
 
   /**
    * Log contact status update
+   * Email is redacted for privacy
    */
   async logContactUpdated(email: string, oldStatus: string, newStatus: string): Promise<void> {
     await this.logEvent('CONTACT_UPDATED', {
-      email,
+      email: redactEmail(email),
       oldStatus,
       newStatus,
     });
@@ -174,6 +194,9 @@ class AuditLogger implements Logger {
 
   /**
    * Log error with context
+   * Stack traces are NOT stored in persistent logs (security)
+   * Only error message and type are logged to database
+   * Stack traces are only output to console.error in development mode
    */
   async logError(
     context: string,
@@ -181,13 +204,42 @@ class AuditLogger implements Logger {
     additionalData?: Record<string, unknown>
   ): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : error;
-    const errorStack = error instanceof Error ? error.stack : undefined;
+    const errorType = error instanceof Error ? error.name : 'Error';
 
+    // Log to database WITHOUT stack trace (security best practice)
     await this.logEvent('ERROR', {
       context,
       errorMessage,
-      errorStack,
+      errorType,
       ...additionalData,
+    });
+
+    // In development mode, also log to console with stack trace for debugging
+    if (isDevelopment() && error instanceof Error && error.stack) {
+      console.error(`[${context}] ${errorType}:`, errorMessage);
+      console.error('Stack trace:', error.stack);
+    }
+  }
+
+  /**
+   * Log informational message
+   */
+  async info(message: string, data?: Record<string, unknown>): Promise<void> {
+    await this.logEvent('USER_INPUT', {
+      level: 'info',
+      message,
+      ...data,
+    });
+  }
+
+  /**
+   * Log warning message
+   */
+  async warn(message: string, data?: Record<string, unknown>): Promise<void> {
+    await this.logEvent('ERROR', {
+      level: 'warn',
+      message,
+      ...data,
     });
   }
 }

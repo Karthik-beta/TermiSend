@@ -6,15 +6,60 @@
 import { getEnv } from './config.js';
 import { logger } from './logger.js';
 import type { EmailVerificationResponse } from './types.js';
+import {
+  RateLimiter,
+  redactEmail,
+  validateEmailFormat,
+  validateEmailVerificationResponse,
+} from './utils/security.js';
 
 // ============================================================================
 // Environment Configuration
 // ============================================================================
 
-const env = getEnv();
-
-const API_KEY = process.env.MYEMAILVERIFIER_API_KEY || env.MYEMAILVERIFIER_API_KEY || '';
 const API_BASE_URL = 'https://api.myemailverifier.com/v1';
+
+/**
+ * Rate limiter for email verification API
+ * Max 1 request per 5 seconds per email
+ */
+const verificationRateLimiter = new RateLimiter(5000, 1);
+
+/**
+ * Get API key dynamically (not cached)
+ * This allows tests to change env vars between tests
+ */
+function getApiKey(): string {
+  const env = getEnv();
+  return process.env.MYEMAILVERIFIER_API_KEY || env.MYEMAILVERIFIER_API_KEY || '';
+}
+
+// ============================================================================
+// Error Classes
+// ============================================================================
+
+/**
+ * Rate limit exceeded error
+ */
+export class RateLimitError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super(`Rate limit exceeded. Retry after ${Math.ceil(retryAfterMs / 1000)} seconds`);
+    this.name = 'RateLimitError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
+ * Email validation error
+ */
+export class EmailValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmailValidationError';
+  }
+}
 
 // ============================================================================
 // API Client
@@ -25,13 +70,29 @@ const API_BASE_URL = 'https://api.myemailverifier.com/v1';
  *
  * @param email - Email address to verify
  * @returns Verification response with status and risk level
+ * @throws RateLimitError if rate limit exceeded
+ * @throws EmailValidationError if email format is invalid
+ * @throws Error if API request fails
  */
 export async function verifyEmail(email: string): Promise<EmailVerificationResponse> {
-  if (!API_KEY) {
+  // Validate email format before making API call
+  const formatValidation = validateEmailFormat(email);
+  if (!formatValidation.valid) {
+    throw new EmailValidationError(formatValidation.error || 'Invalid email format');
+  }
+
+  // Check rate limit (per-email rate limiting)
+  const rateLimitCheck = verificationRateLimiter.checkLimit(email.toLowerCase());
+  if (!rateLimitCheck.allowed) {
+    throw new RateLimitError(rateLimitCheck.retryAfterMs || 5000);
+  }
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
     throw new Error('MYEMAILVERIFIER_API_KEY is not configured');
   }
 
-  // Log the request
+  // Log the request (email is redacted inside logger)
   await logger.logApiVerifierRequest(email);
 
   const url = new URL(`${API_BASE_URL}/verify`);
@@ -42,7 +103,7 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
       method: 'GET',
       headers: {
         Accept: 'application/json',
-        'X-API-Key': API_KEY,
+        'X-API-Key': apiKey,
       },
     });
 
@@ -53,19 +114,27 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
       );
     }
 
-    const data = (await response.json()) as EmailVerificationResponse;
+    // Validate response with Zod schema (security: prevent blind type casts)
+    const rawData: unknown = await response.json();
+    const validatedData = validateEmailVerificationResponse(rawData);
 
-    // Log the response
-    const responseData: Record<string, unknown> = { ...data };
+    // Log the response (email is redacted inside logger)
+    const responseData: Record<string, unknown> = { ...validatedData };
     await logger.logApiVerifierResponse(email, responseData);
 
-    return data;
+    return validatedData;
   } catch (error) {
+    // Don't log the full email in error messages (security)
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await logger.logError('Email Verification API', errorMessage, { email });
+
+    // Log error with redacted email
+    await logger.logError('Email Verification API', errorMessage, {
+      email: redactEmail(email),
+    });
 
     // Re-throw the error to allow caller to handle it appropriately
-    throw new Error(`Email verification failed for ${email}: ${errorMessage}`);
+    // Use redacted email in error message for security
+    throw new Error(`Email verification failed for ${redactEmail(email)}: ${errorMessage}`);
   }
 }
 
@@ -116,30 +185,25 @@ export function getVerificationStatusDescription(result: EmailVerificationRespon
   return `${statusDesc} (${riskDesc})`;
 }
 
-// ============================================================================
-// Bulk Verification (Optional)
-// ============================================================================
-
 /**
- * Verify multiple emails in sequence with rate limiting
+ * Verify multiple emails in bulk
+ * Processes emails sequentially with rate limiting
  *
- * @param emails - Array of email addresses
- * @param delayMs - Delay between requests in milliseconds (default: 1000)
- * @returns Array of verification results
+ * @param emails - Array of email addresses to verify
+ * @returns Array of verification results with email and result/error
  */
 export async function verifyEmailsBulk(
-  emails: string[],
-  delayMs: number = 1000
-): Promise<Array<{ email: string; result: EmailVerificationResponse }>> {
-  const results: Array<{ email: string; result: EmailVerificationResponse }> = [];
+  emails: string[]
+): Promise<Array<{ email: string; result?: EmailVerificationResponse; error?: string }>> {
+  const results: Array<{ email: string; result?: EmailVerificationResponse; error?: string }> = [];
 
   for (const email of emails) {
-    const result = await verifyEmail(email);
-    results.push({ email, result });
-
-    // Rate limiting delay
-    if (delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      const result = await verifyEmail(email);
+      results.push({ email: redactEmail(email), result });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      results.push({ email: redactEmail(email), error: errorMessage });
     }
   }
 

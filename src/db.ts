@@ -1,6 +1,9 @@
 /**
  * Database module for TermiSend
  * Handles PostgreSQL connection, schema initialization, and query execution
+ *
+ * Uses lazy initialization to avoid module-level side effects.
+ * Database connection is only established when first used.
  */
 
 import postgres from 'postgres';
@@ -8,44 +11,111 @@ import { getEnv } from './config.js';
 import type { AuditLog, Contact, JSONValue } from './types.js';
 
 // ============================================================================
-// Environment Configuration
+// Lazy PostgreSQL Client Setup
 // ============================================================================
 
-const env = getEnv();
+let sqlClient: ReturnType<typeof postgres> | null = null;
 
-// Merge with process.env - fail fast if required config is missing
-const DB_HOST = process.env.DB_HOST || env.DB_HOST;
-const DB_PORT = Number.parseInt(process.env.DB_PORT || env.DB_PORT || '5432', 10);
-const DB_USER = process.env.DB_USER || env.DB_USER;
-const DB_PASS = process.env.DB_PASS || env.DB_PASS;
-const DB_NAME = process.env.DB_NAME || env.DB_NAME || 'termisend';
+/**
+ * Get database configuration from environment
+ * Validates configuration lazily on first access
+ */
+function getDbConfig(): {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+} {
+  const env = getEnv();
 
-// Validate required configuration
-if (!DB_HOST) {
-  throw new Error('DB_HOST is required. Set it in environment variables or .env file.');
+  // Merge with process.env
+  const host = process.env.DB_HOST || env.DB_HOST;
+  const port = Number.parseInt(process.env.DB_PORT || env.DB_PORT || '5432', 10);
+  const user = process.env.DB_USER || env.DB_USER;
+  const password = process.env.DB_PASS || env.DB_PASS;
+  const database = process.env.DB_NAME || env.DB_NAME || 'termisend';
+
+  // Validate required configuration lazily
+  if (!host) {
+    throw new Error('DB_HOST is required. Set it in environment variables or .env file.');
+  }
+  if (!user) {
+    throw new Error('DB_USER is required. Set it in environment variables or .env file.');
+  }
+  if (!password) {
+    throw new Error('DB_PASS is required. Set it in environment variables or .env file.');
+  }
+
+  return { host, port, user, password, database };
 }
-if (!DB_USER) {
-  throw new Error('DB_USER is required. Set it in environment variables or .env file.');
-}
-if (!DB_PASS) {
-  throw new Error('DB_PASS is required. Set it in environment variables or .env file.');
+
+/**
+ * Reset the SQL client (for testing purposes only)
+ * @internal
+ */
+export function resetSqlClient(): void {
+  sqlClient = null;
 }
 
-// ============================================================================
-// PostgreSQL Client Setup
-// ============================================================================
+/**
+ * Get or create the PostgreSQL client with lazy initialization
+ * Connection is only established when this function is first called
+ */
+function getSqlClient(): ReturnType<typeof postgres> {
+  if (!sqlClient) {
+    const config = getDbConfig();
 
-// Use connection object format to properly handle special characters in credentials
-export const sql = postgres({
-  host: DB_HOST,
-  port: DB_PORT,
-  user: DB_USER,
-  password: DB_PASS,
-  database: DB_NAME,
-  max: 10,
-  idle_timeout: 20,
-  connect_timeout: 10,
-});
+    // Use connection object format to properly handle special characters in credentials
+    sqlClient = postgres({
+      host: config.host,
+      port: config.port,
+      user: config.user,
+      password: config.password,
+      database: config.database,
+      max: 10,
+      idle_timeout: 20,
+      connect_timeout: 10,
+      transform: {
+        column: { to: postgres.fromCamel, from: postgres.toCamel },
+      },
+    });
+  }
+  return sqlClient;
+}
+
+/**
+ * Exported SQL client with lazy initialization
+ * Uses a wrapper function that delegates to the actual postgres client
+ */
+const sqlWrapper = (...args: unknown[]): unknown => {
+  const client = getSqlClient();
+  // Call the postgres client with the template literal arguments
+  return (client as unknown as (...args: unknown[]) => unknown)(...args);
+};
+
+/**
+ * SQL client with lazy initialization
+ * Database connection is only established when first query is executed
+ */
+export const sql: ReturnType<typeof postgres> = new Proxy(
+  sqlWrapper as unknown as ReturnType<typeof postgres>,
+  {
+    get(_target, prop: string | symbol) {
+      const client = getSqlClient();
+      // Handle string properties normally
+      if (typeof prop === 'string') {
+        return (client as unknown as Record<string, unknown>)[prop];
+      }
+      // Handle symbols (like Symbol.iterator, etc.)
+      return (client as unknown as Record<symbol, unknown>)[prop];
+    },
+    apply(_target, _thisArg, args: unknown[]) {
+      const client = getSqlClient();
+      return (client as unknown as (...args: unknown[]) => unknown)(...args);
+    },
+  }
+) as ReturnType<typeof postgres>;
 
 // ============================================================================
 // Schema Initialization
@@ -182,14 +252,22 @@ export async function contactExists(email: string): Promise<boolean> {
 // ============================================================================
 
 /**
+ * Serialize payload to JSON-compatible format
+ * Handles Date objects and ensures JSON compatibility
+ */
+function serializePayload(payload: Record<string, unknown>): JSONValue {
+  // JSON.parse always returns a JSON-compatible value
+  return JSON.parse(JSON.stringify(payload)) as JSONValue;
+}
+
+/**
  * Insert an audit log entry
  */
 export async function insertAuditLog(
   eventType: string,
   payload: Record<string, unknown>
 ): Promise<AuditLog> {
-  // Serialize payload to ensure JSON compatibility (handles Date objects, etc.)
-  const jsonPayload = JSON.parse(JSON.stringify(payload)) as JSONValue;
+  const jsonPayload = serializePayload(payload);
   const [log] = await sql<AuditLog[]>`
     INSERT INTO audit_logs (event_type, payload)
     VALUES (${eventType}, ${sql.json(jsonPayload)})
@@ -223,10 +301,20 @@ export async function getAuditLogs(eventType?: string, limit: number = 100): Pro
 
 /**
  * Close database connection
+ * Call this during application shutdown for proper cleanup
  */
 export async function closeConnection(): Promise<void> {
-  await sql.end();
+  if (sqlClient) {
+    await sqlClient.end();
+    sqlClient = null;
+  }
 }
+
+/**
+ * Alias for closeConnection for consistent naming with closeSesClient
+ * Call this during application shutdown for proper cleanup
+ */
+export const closeDatabase = closeConnection;
 
 // ============================================================================
 // Standalone initialization (for CLI usage)

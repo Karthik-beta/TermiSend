@@ -12,11 +12,11 @@
  */
 export interface Contact {
   id: string;
-  company_name: string;
-  person_name: string;
+  companyName: string;
+  personName: string;
   email: string;
   status: 'pending' | 'sent' | 'verified' | 'failed' | 'invalid';
-  created_at: Date;
+  createdAt: Date;
 }
 
 /**
@@ -24,9 +24,9 @@ export interface Contact {
  */
 export interface AuditLog {
   id: string;
-  event_type: EventType;
+  eventType: EventType;
   payload: Record<string, unknown>;
-  created_at: Date;
+  createdAt: Date;
 }
 
 // ============================================================================
@@ -160,3 +160,79 @@ export type JSONValue =
   | null
   | JSONValue[]
   | { [key: string]: JSONValue };
+
+// ============================================================================
+// Throttling Types
+// ============================================================================
+
+/**
+ * Throttling Configuration
+ * Controls email sending rate limits and break behavior
+ */
+export interface ThrottleConfig {
+  /** Minimum delay between emails in milliseconds (default: 60000) */
+  minDelayMs: number;
+  /** Maximum delay between emails in milliseconds (default: 120000) */
+  maxDelayMs: number;
+  /** Probability (0-100) of triggering a break (default: 5) */
+  breakProbabilityPercent: number;
+  /** Minimum break duration in minutes (default: 3) */
+  breakMinMinutes: number;
+  /** Maximum break duration in minutes (default: 5) */
+  breakMaxMinutes: number;
+}
+
+/**
+ * Delay calculation result
+ * Contains information about the computed delay and break status
+ */
+export interface DelayResult {
+  /** Base delay in milliseconds */
+  baseDelayMs: number;
+  /** Whether a break was triggered */
+  breakTriggered: boolean;
+  /** Break duration in milliseconds (0 if no break) */
+  breakDurationMs: number;
+  /** Total delay in milliseconds (base + break) */
+  totalDelayMs: number;
+}
+
+/**
+ * Rate limiter interface
+ * Provides methods for acquiring and releasing rate limit permits
+ */
+export interface RateLimiter {
+  /** Acquire permission to proceed (may wait if rate limited) */
+  acquire(): Promise<void>;
+  /** Release a permit back to the pool */
+  release(): void;
+}
+
+/**
+ * SES Quota status
+ * Tracks AWS SES sending limits and usage
+ */
+export interface QuotaStatus {
+  /** Maximum emails allowed per 24 hours */
+  max24HourSend: number;
+  /** Maximum send rate per second */
+  maxSendRate: number;
+  /** Emails sent in last 24 hours */
+  sentLast24Hours: number;
+  /** Remaining quota for current period */
+  remainingQuota: number;
+}
+
+/**
+ * Throttle log entry for audit logging
+ * Records throttling events for monitoring and debugging
+ */
+export interface ThrottleLogEntry {
+  event: 'throttle_delay' | 'throttle_break' | 'rate_limit_wait' | 'quota_pause' | 'quota_resume';
+  baseDelayMs?: number;
+  breakTriggered?: boolean;
+  breakDurationMs?: number;
+  totalDelayMs?: number;
+  reason?: string;
+  timestamp: string;
+}

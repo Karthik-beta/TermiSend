@@ -74,6 +74,103 @@ The application requires a local PostgreSQL database with at least two tables. T
    * Log the exact SES Request parameters and the SES Response (MessageId) to audit\_logs.  
    * Update the contacts table status to 'sent'.
 
+### B.3 Email Throttling & Rate Limiting
+
+To ensure responsible email sending and protect sender reputation, TermiSend implements comprehensive throttling that integrates with AWS SES constraints.
+
+#### Throttling Architecture
+
+The throttling system consists of three layers:
+
+1. **Inter-Email Delays**: Bounded random delays between 60-120 seconds to simulate human sending patterns
+2. **Break Periods**: Random 3-5 minute pauses (5-10% probability) to further humanize sending
+3. **SES Rate Limiting**: Token bucket algorithm ensuring compliance with SES max send rate
+4. **Quota Monitoring**: Automatic pause when approaching daily sending limits
+
+#### Delay Calculation
+
+**Base Delay**:
+- Minimum: 60,000 ms (1 minute)
+- Maximum: 120,000 ms (2 minutes)
+- Distribution: Bounded uniform random (Math.random())
+- Mathematical guarantee: No outliers possible
+
+**Break Modifier** (Optional):
+- Probability: 5-10% (configurable)
+- Duration: 3-5 minutes (bounded uniform random)
+- Adds to base delay when triggered
+
+**Total Delay Formula**:
+```
+totalDelay = max(60000, baseDelay + (breakTriggered ? breakDuration : 0))
+```
+
+#### Configuration Options
+
+All throttling parameters are configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `THROTTLE_MIN_DELAY_MS` | 60000 | Minimum delay between emails (ms) |
+| `THROTTLE_MAX_DELAY_MS` | 120000 | Maximum delay between emails (ms) |
+| `THROTTLE_BREAK_PROBABILITY_PERCENT` | 5 | Probability of break (0-100) |
+| `THROTTLE_BREAK_MIN_MINUTES` | 3 | Minimum break duration (minutes) |
+| `THROTTLE_BREAK_MAX_MINUTES` | 5 | Maximum break duration (minutes) |
+| `SES_RATE_LIMIT_PER_SECOND` | 14 | SES max send rate (tokens/sec) |
+| `SES_QUOTA_BUFFER_PERCENT` | 10 | Safety buffer before quota exhaustion |
+
+#### SES Safety Considerations
+
+**Rate Limiting**:
+- Token bucket algorithm prevents exceeding SES max send rate
+- Each email send acquires a token; tokens refill over time
+- Prevents burst sending that could trigger SES throttling
+
+**Quota Monitoring**:
+- Periodically checks SES account send quota (every 5 minutes)
+- Automatically pauses when approaching daily limit
+- Respects configurable buffer percentage (default: 10%)
+- Graceful degradation: allows sending if quota check fails
+
+**Expected Throughput**:
+- With default settings: ~40-50 emails/hour
+- With break triggered: ~30-35 emails/hour
+- Well within typical SES sandbox limits (14/sec, 200/day)
+
+#### Example Configuration
+
+```bash
+# Conservative settings for new domains
+THROTTLE_MIN_DELAY_MS=90000
+THROTTLE_MAX_DELAY_MS=180000
+THROTTLE_BREAK_PROBABILITY_PERCENT=10
+THROTTLE_BREAK_MIN_MINUTES=5
+THROTTLE_BREAK_MAX_MINUTES=10
+SES_RATE_LIMIT_PER_SECOND=1
+SES_QUOTA_BUFFER_PERCENT=20
+```
+
+#### Implementation Details
+
+**Files**:
+- `src/throttle.ts` - Core throttling logic (delay calculator, rate limiter, quota monitor)
+- `src/mailer.ts` - Integration point (waits before each email)
+- `src/ses.ts` - Rate limiting wrapper around SES sends
+- `src/types.ts` - TypeScript interfaces for configuration
+
+**Logging**:
+Every throttling event is logged with structured data:
+- Delay calculations (base, break, total)
+- Rate limit waits
+- Quota pauses and resumes
+
+**Testing**:
+Comprehensive unit tests validate:
+- Delay bounds (always 60s+)
+- Statistical correctness of break probability
+- Rate limiter behavior
+- Quota monitoring logic
+
 ## **7\. Architecture & File Structure Requirements**
 
 The codebase must be strictly modular, type-safe, and well-documented. Each major domain must reside in its own file.

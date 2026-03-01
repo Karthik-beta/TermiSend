@@ -7,6 +7,7 @@ import ExcelJs from 'exceljs';
 import { type ZodIssue, z } from 'zod';
 import { sql } from './db.js';
 import { logger } from './logger.js';
+import { validateImportPath } from './path-validator.js';
 import type { ContactInput, ImportResult } from './types.js';
 
 // ============================================================================
@@ -84,6 +85,74 @@ function validateRow(
 }
 
 // ============================================================================
+// Row Processing Helper
+// ============================================================================
+
+/**
+ * Process a single Excel row and insert into database
+ */
+async function processRow(
+  row: ExcelJs.Row,
+  rowNumber: number,
+  headerStrings: string[],
+  result: ImportResult
+): Promise<void> {
+  // Skip empty rows
+  if (row.values === null || row.values === undefined) {
+    return;
+  }
+
+  const rowData: ExcelRow = {
+    'Company Name': row.getCell(headerStrings.indexOf('Company Name') + 1).value as string | number,
+    'Person Name': row.getCell(headerStrings.indexOf('Person Name') + 1).value as string | number,
+    Email: row.getCell(headerStrings.indexOf('Email') + 1).value as string | number,
+  };
+
+  const normalizedData = normalizeRow(rowData);
+
+  // Skip rows with all empty values
+  if (!normalizedData.companyName && !normalizedData.personName && !normalizedData.email) {
+    return;
+  }
+
+  // Validate row
+  const validation = validateRow(normalizedData, rowNumber);
+
+  if (!validation.success) {
+    result.failedCount++;
+    result.errors.push({
+      row: rowNumber,
+      error: validation.error,
+    });
+    await logger.logExcelImportRowInvalid(rowNumber, validation.error, normalizedData);
+    return;
+  }
+
+  try {
+    // Insert contact
+    await sql`
+      INSERT INTO contacts (company_name, person_name, email, status)
+      VALUES (${validation.data.companyName}, ${validation.data.personName}, ${validation.data.email}, 'pending')
+      ON CONFLICT (email) DO UPDATE SET
+        company_name = EXCLUDED.company_name,
+        person_name = EXCLUDED.person_name,
+        status = 'pending'
+    `;
+
+    result.successCount++;
+    await logger.logExcelImportRowValid(rowNumber, { rowNumber });
+  } catch (error) {
+    result.failedCount++;
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push({
+      row: rowNumber,
+      error: errorMsg,
+    });
+    await logger.logExcelImportRowInvalid(rowNumber, errorMsg, { rowNumber });
+  }
+}
+
+// ============================================================================
 // Main Import Function
 // ============================================================================
 
@@ -100,9 +169,18 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     errors: [],
   };
 
+  // Validate file path for security
+  const pathValidation = validateImportPath(filePath);
+  if (!pathValidation.valid) {
+    throw new Error(`Invalid file path: ${pathValidation.error}`);
+  }
+
+  // Use the sanitized path
+  const sanitizedPath = pathValidation.sanitizedPath;
+
   try {
     // Validate file exists and is readable
-    const file = Bun.file(filePath);
+    const file = Bun.file(sanitizedPath);
     const exists = await file.exists();
     if (!exists) {
       throw new Error(`File not found: ${filePath}`);
@@ -110,7 +188,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
 
     // Read Excel file
     const workbook = new ExcelJs.Workbook();
-    await workbook.xlsx.readFile(filePath);
+    await workbook.xlsx.readFile(sanitizedPath);
 
     // Get the first worksheet
     const worksheet = workbook.getWorksheet(1);
@@ -134,69 +212,11 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     result.totalRows = dataRows;
 
     // Log import start
-    await logger.logExcelImportStart(filePath, dataRows);
+    await logger.logExcelImportStart(sanitizedPath, dataRows);
 
     // Process each row
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
-      const row = worksheet.getRow(rowNumber);
-
-      // Skip empty rows
-      if (row.values === null || row.values === undefined) {
-        continue;
-      }
-
-      const rowData: ExcelRow = {
-        'Company Name': row.getCell(headerStrings.indexOf('Company Name') + 1).value as
-          | string
-          | number,
-        'Person Name': row.getCell(headerStrings.indexOf('Person Name') + 1).value as
-          | string
-          | number,
-        Email: row.getCell(headerStrings.indexOf('Email') + 1).value as string | number,
-      };
-
-      const normalizedData = normalizeRow(rowData);
-
-      // Skip rows with all empty values
-      if (!normalizedData.companyName && !normalizedData.personName && !normalizedData.email) {
-        continue;
-      }
-
-      // Validate row
-      const validation = validateRow(normalizedData, rowNumber);
-
-      if (!validation.success) {
-        result.failedCount++;
-        result.errors.push({
-          row: rowNumber,
-          error: validation.error,
-        });
-        await logger.logExcelImportRowInvalid(rowNumber, validation.error, normalizedData);
-        continue;
-      }
-
-      try {
-        // Insert contact
-        await sql`
-          INSERT INTO contacts (company_name, person_name, email, status)
-          VALUES (${validation.data.companyName}, ${validation.data.personName}, ${validation.data.email}, 'pending')
-          ON CONFLICT (email) DO UPDATE SET
-            company_name = EXCLUDED.company_name,
-            person_name = EXCLUDED.person_name,
-            status = 'pending'
-        `;
-
-        result.successCount++;
-        await logger.logExcelImportRowValid(rowNumber, { rowNumber });
-      } catch (error) {
-        result.failedCount++;
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        result.errors.push({
-          row: rowNumber,
-          error: errorMsg,
-        });
-        await logger.logExcelImportRowInvalid(rowNumber, errorMsg, { rowNumber });
-      }
+      await processRow(worksheet.getRow(rowNumber), rowNumber, headerStrings, result);
     }
 
     // Log import completion
@@ -209,7 +229,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await logger.logError('Excel Import', errorMessage, { filePath });
+    await logger.logError('Excel Import', errorMessage, { filePath: sanitizedPath });
     throw error;
   }
 }

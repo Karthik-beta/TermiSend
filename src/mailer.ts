@@ -7,9 +7,23 @@ import { readFile } from 'node:fs/promises';
 import { marked } from 'marked';
 import { getPendingContacts, updateContactStatus } from './db.js';
 import { logger } from './logger.js';
+import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
+import { EmailThrottleController, getEmailThrottleController } from './throttle.js';
 import type { CampaignResult, Contact, EmailSendParams } from './types.js';
+import { getSafeFilename } from './utils/security.js';
 import { verifyEmail } from './verifier.js';
+
+// Test-only exports for dependency injection
+// Use regular properties (not getters) so Bun's spyOn can mock them
+export const __test = {
+  getPendingContacts: getPendingContacts,
+  updateContactStatus: updateContactStatus,
+  sendEmail: sendEmail,
+  verifyEmail: verifyEmail,
+  emailThrottleController: EmailThrottleController,
+  resetThrottleController: () => EmailThrottleController.resetInstance(),
+};
 
 // ============================================================================
 // Spintax Parser
@@ -92,10 +106,10 @@ function splitOptions(content: string): string[] {
  */
 export function processTemplate(template: string, contact: Contact): string {
   // Replace {Person Name} placeholder
-  let processed = template.replace(/\{Person Name\}/g, contact.person_name);
+  let processed = template.replace(/\{Person Name\}/g, contact.personName);
 
   // Replace {Company Name} placeholder
-  processed = processed.replace(/\{Company Name\}/g, contact.company_name);
+  processed = processed.replace(/\{Company Name\}/g, contact.companyName);
 
   // Parse spintax
   processed = parseSpintax(processed);
@@ -198,20 +212,50 @@ export async function runCampaign(
     details: [],
   };
 
+  // Validate template path for security
+  const pathValidation = validateTemplatePath(templatePath);
+  if (!pathValidation.valid) {
+    throw new Error(`Invalid template path: ${pathValidation.error}`);
+  }
+  const sanitizedTemplatePath = pathValidation.sanitizedPath;
+
+  // Get shared throttle controller singleton
+  const throttleController = getEmailThrottleController();
+
+  // Get pending contacts
+  const contacts = await getPendingContacts();
+  result.totalContacts = contacts.length;
+
+  if (contacts.length === 0) {
+    return result;
+  }
+
+  // Preliminary quota check before starting campaign
+  const canStartCampaign = await throttleController.checkQuota();
+  if (!canStartCampaign) {
+    // Mark all contacts as failed
+    for (const contact of contacts) {
+      result.failedCount++;
+      result.details.push({
+        email: contact.email,
+        status: 'failed',
+        reason: 'SES quota near exhaustion. Campaign aborted.',
+      });
+      await updateContactStatus(contact.email, 'failed');
+    }
+    return result;
+  }
+
   try {
     // Read template file
-    const templateContent = await readFile(templatePath, 'utf-8');
-
-    // Get pending contacts
-    const contacts = await getPendingContacts();
-    result.totalContacts = contacts.length;
-
-    if (contacts.length === 0) {
-      return result;
-    }
+    const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
 
     // Process each contact
     for (const contact of contacts) {
+      // Wait before processing next email (throttling)
+      // This enforces the configured delay between personalizations
+      await throttleController.waitBeforeSend();
+
       try {
         // Process template
         const processedTemplate = processTemplate(templateContent, contact);
@@ -258,7 +302,7 @@ export async function runCampaign(
           textBody,
         };
 
-        const sendResult = await sendEmail(emailParams);
+        const sendResult = await sendEmail(emailParams, throttleController);
 
         if (sendResult.success) {
           result.sentCount++;
@@ -289,7 +333,7 @@ export async function runCampaign(
         });
         await logger.logError('Campaign Processing', errorMsg, {
           email: contact.email,
-          contact: { companyName: contact.company_name, personName: contact.person_name },
+          contact: { companyName: contact.companyName, personName: contact.personName },
         });
         await updateContactStatus(contact.email, 'failed');
       }
@@ -298,7 +342,9 @@ export async function runCampaign(
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await logger.logError('Campaign Execution', errorMessage, { templatePath });
+    await logger.logError('Campaign Execution', errorMessage, {
+      templateName: getSafeFilename(sanitizedTemplatePath),
+    });
     throw error;
   }
 }
@@ -315,7 +361,14 @@ export async function generatePreview(
   templatePath: string,
   sampleContact: Contact
 ): Promise<{ subject: string; htmlBody: string; textBody: string }> {
-  const templateContent = await readFile(templatePath, 'utf-8');
+  // Validate template path for security
+  const pathValidation = validateTemplatePath(templatePath);
+  if (!pathValidation.valid) {
+    throw new Error(`Invalid template path: ${pathValidation.error}`);
+  }
+  const sanitizedTemplatePath = pathValidation.sanitizedPath;
+
+  const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
   const processedTemplate = processTemplate(templateContent, sampleContact);
   const { subject, body } = extractSubject(processedTemplate);
   const htmlBody = await renderMarkdown(body);
