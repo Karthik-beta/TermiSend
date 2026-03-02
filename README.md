@@ -10,6 +10,7 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
 - 📝 **Markdown Templates**: Write emails in Markdown, rendered to HTML
 - 🗄️ **Audit Logging**: Every action logged to PostgreSQL for compliance
 - 🖥️ **Terminal UI**: Beautiful TUI built with Ink and React
+- 📄 **Template Generator**: Download Excel templates with proper format
 
 ## Tech Stack
 
@@ -110,24 +111,34 @@ The application presents a simple menu:
 - **📤 Send Email Campaign** - Send emails to pending contacts
 - **❌ Quit** - Exit the application
 
-### Importing Contacts (Part A)
+### Importing Contacts
 
 1. Select "Import Excel Contacts" from the menu
 2. Enter the path to your Excel file
-3. The system will:
+3. Optionally press **T** to download an Excel template
+4. The system will:
    - Parse the Excel file
    - Validate columns (Company Name, Person Name, Email)
    - Validate email format using Zod
    - Insert valid contacts into PostgreSQL
    - Log all actions to audit_logs
 
-**Excel Format:**
+### Downloading Excel Template
+
+When importing contacts, you can download a template file:
+
+1. Select "Import Excel Contacts" from the menu
+2. Press **T** to download an Excel template
+3. The template is saved to `./contacts-template.xlsx`
+4. Open it in Excel, fill in your contacts, and import
+
+**Excel Template Format:**
 | Company Name | Person Name | Email |
 |--------------|-------------|-------|
 | Acme Corp | John Doe | john@acme.com |
 | Tech Inc | Jane Smith | jane@tech.com |
 
-### Sending Email Campaigns (Part B)
+### Sending Email Campaigns
 
 1. Select "Send Email Campaign" from the menu
 2. Enter the path to your Markdown template file
@@ -160,6 +171,34 @@ Your Name
 - Nested spintax supported: `{Hello|Hi {there|friend}}`
 - Placeholders: `{Person Name}`, `{Company Name}`
 
+### Database Reset (Development Only)
+
+Reset the database to a clean state during development:
+
+```bash
+# Using CLI flag
+bun run db:reset --confirm-reset
+
+# Or using shorthand
+bun run db:reset -y
+
+# Or using environment variable
+ALLOW_DEV_RESET=true bun run db:reset
+```
+
+**⚠️ Security Notice:**
+- The database reset feature is **only available in development environments**
+- It will **not work** in production (NODE_ENV=production)
+- It will **not work** if DB_NAME contains "prod" or "production"
+- Always confirm before running to avoid accidental data loss
+
+## Database Commands
+
+| Command | Description |
+|---------|-------------|
+| `bun run db:init` | Initialize database schema (create tables) |
+| `bun run db:reset` | Reset database (delete all data) - DEV ONLY |
+
 ## Project Structure
 
 ```
@@ -167,13 +206,17 @@ termisend/
 ├── src/
 │   ├── index.tsx          # Entry point - mounts Ink UI
 │   ├── ui.tsx             # Ink/React TUI components
-│   ├── db.ts              # Database connection & schema init
-│   ├── logger.ts          # Audit logging utility
-│   ├── importer.ts        # Excel import logic (Part A)
-│   ├── mailer.ts          # Spintax & markdown rendering (Part B)
+│   ├── db.ts              # Database connection, schema init, and reset
+│   ├── logger.ts         # Audit logging utility
+│   ├── importer.ts       # Excel import logic
+│   ├── template-generator.ts  # Excel template generator
+│   ├── mailer.ts          # Spintax & markdown rendering
 │   ├── verifier.ts        # MyEmailVerifier API client
 │   ├── ses.ts             # AWS SES integration
+│   ├── path-validator.ts # Path validation for security
 │   └── types.ts           # TypeScript type definitions
+├── templates/             # Email template samples
+├── tests/                 # Unit and integration tests
 ├── .env.development       # Development environment template
 ├── .env.production        # Production environment template
 ├── package.json           # Dependencies & scripts
@@ -201,6 +244,13 @@ termisend/
 | payload | JSONB | Event data |
 | created_at | TIMESTAMP | Creation timestamp |
 
+### email_verifier_credits table
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key (singleton) |
+| credits | INTEGER | Available verification credits |
+| updated_at | TIMESTAMP | Last update timestamp |
+
 **Event Types:**
 - `USER_INPUT` - User interactions
 - `EXCEL_IMPORT_START` - Import started
@@ -222,7 +272,11 @@ termisend/
 | `bun run dev` | Start in development mode |
 | `bun run prod` | Start in production mode |
 | `bun run db:init` | Initialize database schema |
+| `bun run db:reset` | Reset database (development only) |
 | `bun run typecheck` | Run TypeScript type checking |
+| `bun run lint` | Run Biome linter |
+| `bun run lint:fix` | Fix linting issues automatically |
+| `bun test` | Run all tests |
 
 ## Environment Modes
 
@@ -238,6 +292,7 @@ NODE_ENV=production bun run start
 
 ## Security Considerations
 
+### General Security
 - All credentials are stored in environment variables
 - No hardcoded secrets in source code
 - Database uses parameterized queries (SQL injection safe)
@@ -245,12 +300,41 @@ NODE_ENV=production bun run start
 - Audit logging of all operations
 - Local-only execution (no network exposure)
 
+### Path Validation
+The application implements path validation to prevent path traversal attacks:
+- All file paths are validated before use
+- Path traversal sequences (`..`, `/`, `\`) are blocked
+- Only relative paths within the project directory are allowed
+
+### Template Generator Security
+- Path validation prevents writing to arbitrary locations
+- Overwrite protection prevents accidental file replacement
+- User must explicitly provide file paths
+
+### Database Reset Protection
+The database reset feature includes multiple guardrails:
+1. **Environment Check**: Blocked in production (NODE_ENV=production)
+2. **Database Name Check**: Blocked if DB_NAME contains "prod" or "production"
+3. **Explicit Confirmation**: Requires `--confirm-reset` flag or `ALLOW_DEV_RESET=true`
+
+**This makes it impossible to accidentally reset a production database.**
+
 ## Troubleshooting
 
 ### Database Connection Issues
 - Verify PostgreSQL is running
 - Check credentials in environment file
 - Ensure database `termisend` exists
+
+### Database Reset Fails
+- Make sure you're in development mode (not production)
+- Check that DB_NAME doesn't contain "prod"
+- Use `--confirm-reset` flag or set `ALLOW_DEV_RESET=true`
+
+### Template Generation Fails
+- Check file path doesn't contain traversal sequences (`..`)
+- Ensure you have write permissions to the target directory
+- If file already exists, either delete it first or use a different path
 
 ### AWS SES Issues
 - Verify sender email is verified in SES console
@@ -265,6 +349,20 @@ NODE_ENV=production bun run start
 - Ensure Excel file has headers: "Company Name", "Person Name", "Email"
 - Check file path is correct
 - Verify file is not corrupted
+- Use the built-in template generator (press T) to ensure correct format
+
+## Running Tests
+
+```bash
+# Run all tests
+bun test
+
+# Run specific test file
+bun test tests/unit/db-reset.test.ts
+
+# Run tests with coverage
+bun test --coverage
+```
 
 ## License
 
@@ -272,4 +370,4 @@ MIT License - This is an internal tool for authorized use only.
 
 ## Support
 
-For issues or questions, refer to the implementation plan in `plans/implementation-plan.md` or contact the development team.
+For issues or questions, refer to the implementation plans in the `plans/` directory or contact the development team.
