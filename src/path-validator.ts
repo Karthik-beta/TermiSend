@@ -40,18 +40,51 @@ export interface PathValidationResult {
 /**
  * Check if a path contains traversal sequences
  * Rejects paths containing '..' or encoded variants
+ *
+ * Security: Handles mixed-encoding attacks by decoding up to 3 layers deep.
+ * This catches patterns like %2e.%2e/ (single-encoded), %252e%252e%252f (double-encoded),
+ * and hex escapes like \x2e. Each layer is decoded and checked for traversal patterns.
  */
 function containsTraversal(input: string): boolean {
-  // Check for common traversal patterns
-  const traversalPatterns = [
-    '..',
-    '%2e%2e', // URL encoded ..
-    '%2E%2E', // URL encoded .. (uppercase)
-    '....', // Windows alternative
-  ];
+  // Check for null bytes first (common injection attack)
+  if (input.includes('%00')) {
+    return true;
+  }
+
+  // Decode the input multiple times to handle nested/mixed encoding
+  // This catches patterns like %2e.%2e/ or %252e%252e%252f
+  let decoded = input;
+  const maxDecodeIterations = 3;
+
+  for (let i = 0; i < maxDecodeIterations; i++) {
+    try {
+      const prev = decoded;
+      decoded = decodeURIComponent(decoded);
+      // Stop if no more decoding happened
+      if (decoded === prev) {
+        break;
+      }
+    } catch {
+      // Malformed URI - stop decoding but continue with checks
+      break;
+    }
+  }
+
+  // Replace hex escape sequences like \x2e (which represents '.')
+  decoded = decoded.replace(/\\x2e/gi, '.');
 
   // Normalize slashes for cross-platform checks
-  const normalized = input.replace(/\\/g, '/');
+  const normalized = decoded.replace(/\\/g, '/');
+
+  // Check for traversal patterns in decoded string
+  const traversalPatterns = [
+    '../', // Unix traversal
+    '..\\', // Windows traversal
+    '/..', // Trailing traversal
+    '\\..', // Windows trailing
+    '..', // Generic
+    '....', // Windows alternative
+  ];
 
   return traversalPatterns.some((pattern) => normalized.includes(pattern));
 }
