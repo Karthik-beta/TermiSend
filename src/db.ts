@@ -9,6 +9,7 @@
 import postgres from 'postgres';
 import { getEnv } from './config.js';
 import type { AuditLog, Contact, EmailVerifierCredits, JSONValue } from './types.js';
+import { isProduction } from './utils/security.js';
 
 // Fixed singleton ID for the email_verifier_credits table (singleton pattern)
 const EMAIL_VERIFIER_CREDITS_SINGLETON_ID = '00000000-0000-0000-0000-000000000001';
@@ -350,6 +351,122 @@ export async function updateEmailVerifierCredits(credits: number): Promise<Email
 }
 
 // ============================================================================
+// Database Reset (Development Only)
+// ============================================================================
+
+/**
+ * Validate that reset can proceed safely
+ * @throws Error if any guardrail check fails
+ */
+function validateResetGuardrails(): {
+  isAllowed: boolean;
+  reason?: string;
+} {
+  // Guardrail 1: Check NODE_ENV
+  if (isProduction()) {
+    return {
+      isAllowed: false,
+      reason: 'Cannot reset database in production environment. NODE_ENV=production detected.',
+    };
+  }
+
+  // Guardrail 2: Check database name for production indicators
+  const env = getEnv();
+  const dbName = (process.env.DB_NAME || env.DB_NAME || 'termisend').toLowerCase();
+  const productionPatterns = [
+    '_prod',
+    'prod_',
+    '-prod',
+    '_production',
+    'production_',
+    '-production',
+  ];
+  const isProductionDbName =
+    dbName === 'production' ||
+    dbName === 'prod' ||
+    productionPatterns.some((pattern) => dbName.endsWith(pattern));
+  if (isProductionDbName) {
+    return {
+      isAllowed: false,
+      reason: `Cannot reset database with name '${dbName}'. Detected production database name.`,
+    };
+  }
+
+  return { isAllowed: true };
+}
+
+/**
+ * Check if reset confirmation is provided
+ * Either via --confirm-reset CLI flag or ALLOW_DEV_RESET env var
+ */
+function hasResetConfirmation(): boolean {
+  // Check CLI flag (process.argv)
+  const hasCliFlag = process.argv.includes('--confirm-reset') || process.argv.includes('-y');
+
+  // Check environment variable
+  const hasEnvVar = process.env.ALLOW_DEV_RESET === 'true';
+
+  return hasCliFlag || hasEnvVar;
+}
+
+/**
+ * Reset database to fresh state (DELETE ALL DATA)
+ * ONLY works in development environment with explicit confirmation
+ *
+ * @returns Result object with success status and message
+ * @throws Error if in production or confirmation not provided
+ *
+ * @example
+ * // Usage: bun run db:reset --confirm-reset
+ * // Or: ALLOW_DEV_RESET=true bun run db:reset
+ */
+export async function resetDatabase(): Promise<{ success: boolean; message: string }> {
+  // Guardrail 1 & 2: Environment and DB name validation
+  const guardrailCheck = validateResetGuardrails();
+  if (!guardrailCheck.isAllowed) {
+    throw new Error(guardrailCheck.reason);
+  }
+
+  // Guardrail 3: Explicit confirmation required
+  if (!hasResetConfirmation()) {
+    throw new Error(
+      'Confirmation required. Use --confirm-reset flag or set ALLOW_DEV_RESET=true environment variable.\n' +
+        'Example: bun run db:reset --confirm-reset\n' +
+        '   Or: ALLOW_DEV_RESET=true bun run db:reset'
+    );
+  }
+
+  // Guardrail 4: Log warning
+  const env = getEnv();
+  const dbName = process.env.DB_NAME || env.DB_NAME || 'termisend';
+  console.warn('⚠️  WARNING: Database reset will DELETE ALL DATA!');
+  console.warn(`⚠️  Database: ${dbName}`);
+  console.warn(`⚠️  Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.warn('⚠️  This action cannot be undone!\n');
+
+  try {
+    // Execute truncate with CASCADE to handle any foreign key references
+    // RESTART IDENTITY resets auto-increment sequences
+    //
+    // IMPORTANT: When new tables are added to the database schema, they must be
+    // added to this TRUNCATE list to ensure complete database resets.
+    await sql`
+      TRUNCATE TABLE contacts, audit_logs, email_verifier_credits
+      RESTART IDENTITY CASCADE
+    `;
+
+    return {
+      success: true,
+      message: `Database '${dbName}' reset successfully. All data deleted.`,
+    };
+  } catch (error) {
+    throw new Error(
+      `Database reset failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+// ============================================================================
 // Connection Management
 // ============================================================================
 
@@ -375,6 +492,25 @@ export const closeDatabase = closeConnection;
 // ============================================================================
 
 async function runStandalone(): Promise<void> {
+  const args = process.argv.slice(2);
+
+  // Handle reset command
+  if (args[0] === 'reset') {
+    try {
+      await resetDatabase();
+      await closeConnection();
+      process.exit(0);
+    } catch (error) {
+      console.error(
+        '✗ Database reset failed:',
+        error instanceof Error ? error.message : String(error)
+      );
+      process.exit(1);
+    }
+    return;
+  }
+
+  // Default: initialize schema
   try {
     await initializeSchema();
     await closeConnection();
