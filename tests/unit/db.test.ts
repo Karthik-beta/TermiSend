@@ -36,11 +36,16 @@ const {
   closeConnection,
   contactExists,
   getContacts,
-  getPendingContacts,
+  getEligibleContacts,
+  getEligibleContactCount,
   initializeSchema,
   insertAuditLog,
   insertContact,
-  updateContactStatus,
+  createSendLog,
+  updateSendLog,
+  getContactSendLogs,
+  getPendingSendLogs,
+  getSendStats,
   resetSqlClient,
 } = await import('../../src/db.js');
 
@@ -80,7 +85,7 @@ describe('Database Module', () => {
       expect(hasAuditLogsTable).toBe(true);
     });
 
-    it('should create indexes on email and status columns', async () => {
+    it('should create indexes on email column', async () => {
       const executedQueries: string[] = [];
       mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
         executedQueries.push(strings.join(''));
@@ -88,9 +93,28 @@ describe('Database Module', () => {
       });
       await initializeSchema();
       const hasEmailIndex = executedQueries.some((q) => q.includes('idx_contacts_email'));
-      const hasStatusIndex = executedQueries.some((q) => q.includes('idx_contacts_status'));
       expect(hasEmailIndex).toBe(true);
-      expect(hasStatusIndex).toBe(true);
+    });
+
+    it('should create send_logs table with indexes', async () => {
+      const executedQueries: string[] = [];
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(''));
+        return Promise.resolve([]);
+      });
+      await initializeSchema();
+      const hasSendLogsTable = executedQueries.some((q) =>
+        q.includes('CREATE TABLE IF NOT EXISTS send_logs')
+      );
+      const hasSendLogsContactIndex = executedQueries.some((q) =>
+        q.includes('idx_send_logs_contact_id')
+      );
+      const hasSendLogsStatusIndex = executedQueries.some((q) =>
+        q.includes('idx_send_logs_status')
+      );
+      expect(hasSendLogsTable).toBe(true);
+      expect(hasSendLogsContactIndex).toBe(true);
+      expect(hasSendLogsStatusIndex).toBe(true);
     });
 
     it('should handle database errors gracefully', async () => {
@@ -138,7 +162,6 @@ describe('Database Module', () => {
         email: mockContact.email,
         companyName: mockContact.companyName,  // camelCase
         personName: mockContact.personName,    // camelCase
-        status: mockContact.status,
         createdAt: mockContact.createdAt,      // camelCase
       };
       mockSqlFn.mockImplementation(() => Promise.resolve([dbRow]));
@@ -161,7 +184,6 @@ describe('Database Module', () => {
         email: updatedContact.email,
         companyName: updatedContact.companyName,
         personName: updatedContact.personName,
-        status: updatedContact.status,
         createdAt: updatedContact.createdAt,
       };
       mockSqlFn.mockImplementation(() => Promise.resolve([dbRow]));
@@ -170,26 +192,6 @@ describe('Database Module', () => {
 
       expect(result.companyName).toBe('New Company');
       expect(result.personName).toBe('John Updated');
-    });
-
-    it('should reset status to pending on conflict update', async () => {
-      const updatedContact = createMockContact({
-        email: 'john@test.com',
-        status: 'pending',
-      });
-      const dbRow = {
-        id: updatedContact.id,
-        email: updatedContact.email,
-        companyName: updatedContact.companyName,
-        personName: updatedContact.personName,
-        status: updatedContact.status,
-        createdAt: updatedContact.createdAt,
-      };
-      mockSqlFn.mockImplementation(() => Promise.resolve([dbRow]));
-
-      const result = await insertContact('Company', 'Person', 'john@test.com');
-
-      expect(result.status).toBe('pending');
     });
 
     it('should handle database insertion errors', async () => {
@@ -208,7 +210,6 @@ describe('Database Module', () => {
         email: contactWithSpecialChars.email,
         companyName: contactWithSpecialChars.companyName,
         personName: contactWithSpecialChars.personName,
-        status: contactWithSpecialChars.status,
         createdAt: contactWithSpecialChars.createdAt,
       };
       mockSqlFn.mockImplementation(() => Promise.resolve([dbRow]));
@@ -229,7 +230,7 @@ describe('Database Module', () => {
   // ============================================================================
 
   describe('getContacts()', () => {
-    it('should return all contacts when no status filter is provided', async () => {
+    it('should return all contacts', async () => {
       const mockContacts = createMockContacts(5);
       // Return camelCase (as transformed by postgres client)
       const dbRows = mockContacts.map(c => ({
@@ -237,7 +238,6 @@ describe('Database Module', () => {
         email: c.email,
         companyName: c.companyName,
         personName: c.personName,
-        status: c.status,
         createdAt: c.createdAt,
       }));
       mockSqlFn.mockImplementation(() => Promise.resolve(dbRows));
@@ -245,32 +245,6 @@ describe('Database Module', () => {
       const result = await getContacts();
 
       expect(result).toHaveLength(5);
-    });
-
-    it('should return filtered contacts by status', async () => {
-      const pendingContacts = createMockContacts(3, { status: 'pending' });
-      const dbRows = pendingContacts.map(c => ({
-        id: c.id,
-        email: c.email,
-        companyName: c.companyName,
-        personName: c.personName,
-        status: c.status,
-        createdAt: c.createdAt,
-      }));
-      mockSqlFn.mockImplementation(() => Promise.resolve(dbRows));
-
-      const result = await getContacts('pending');
-
-      expect(result).toHaveLength(3);
-      result.forEach((contact) => {
-        expect(contact.status).toBe('pending');
-      });
-    });
-
-    it('should return empty array when no contacts match status', async () => {
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
-      const result = await getContacts('nonexistent_status');
-      expect(result).toHaveLength(0);
     });
 
     it('should order results by created_at descending', async () => {
@@ -284,7 +258,6 @@ describe('Database Module', () => {
         email: c.email,
         companyName: c.companyName,
         personName: c.personName,
-        status: c.status,
         createdAt: c.createdAt,
       }));
       mockSqlFn.mockImplementation(() => Promise.resolve(dbRows));
@@ -304,98 +277,153 @@ describe('Database Module', () => {
   });
 
   // ============================================================================
-  // getPendingContacts() Tests
+  // getEligibleContacts() Tests
   // ============================================================================
 
-  describe('getPendingContacts()', () => {
-    it('should return only pending contacts', async () => {
-      const pendingContacts = createMockContacts(5, { status: 'pending' });
-      const dbRows = pendingContacts.map(c => ({
+  describe('getEligibleContacts()', () => {
+    it('should return contacts without successful send log', async () => {
+      const mockContacts = createMockContacts(3);
+      const dbRows = mockContacts.map(c => ({
         id: c.id,
         email: c.email,
         companyName: c.companyName,
         personName: c.personName,
-        status: c.status,
         createdAt: c.createdAt,
       }));
       mockSqlFn.mockImplementation(() => Promise.resolve(dbRows));
 
-      const result = await getPendingContacts();
+      const result = await getEligibleContacts();
 
-      expect(result).toHaveLength(5);
-      result.forEach((contact) => {
-        expect(contact.status).toBe('pending');
-      });
+      expect(result).toHaveLength(3);
     });
 
-    it('should return empty array when no pending contacts exist', async () => {
+    it('should return empty array when no eligible contacts exist', async () => {
       mockSqlFn.mockImplementation(() => Promise.resolve([]));
-      const result = await getPendingContacts();
+      const result = await getEligibleContacts();
       expect(result).toHaveLength(0);
-    });
-
-    it('should order results by created_at ascending', async () => {
-      const sortedContacts = [
-        createMockContact({ createdAt: new Date('2024-01-13') }),
-        createMockContact({ createdAt: new Date('2024-01-14') }),
-        createMockContact({ createdAt: new Date('2024-01-15') }),
-      ];
-      const dbRows = sortedContacts.map(c => ({
-        id: c.id,
-        email: c.email,
-        companyName: c.companyName,
-        personName: c.personName,
-        status: c.status,
-        createdAt: c.createdAt,
-      }));
-      mockSqlFn.mockImplementation(() => Promise.resolve(dbRows));
-
-      const result = await getPendingContacts();
-
-      expect(result[0].createdAt.getTime()).toBeLessThanOrEqual(result[1].createdAt.getTime());
     });
 
     it('should handle database query errors', async () => {
       const dbError = new Error('Connection timeout');
       mockSqlFn.mockImplementation(() => Promise.reject(dbError));
-      await expect(getPendingContacts()).rejects.toThrow('Connection timeout');
+      await expect(getEligibleContacts()).rejects.toThrow('Connection timeout');
     });
   });
 
   // ============================================================================
-  // updateContactStatus() Tests
+  // getEligibleContactCount() Tests
   // ============================================================================
 
-  describe('updateContactStatus()', () => {
-    it('should update contact status successfully', async () => {
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
-      await updateContactStatus('test@example.com', 'sent');
-      expect(mockSqlFn).toHaveBeenCalled();
+  describe('getEligibleContactCount()', () => {
+    it('should return count of eligible contacts', async () => {
+      mockSqlFn.mockImplementation(() => Promise.resolve([{ count: 5 }]));
+      const result = await getEligibleContactCount();
+      expect(result).toBe(5);
     });
 
-    it('should support all valid status values', async () => {
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
-      const statuses: Contact['status'][] = ['pending', 'sent', 'verified', 'failed', 'invalid'];
-      for (const status of statuses) {
-        mockSqlFn.mockClear();
-        await updateContactStatus('test@example.com', status);
-        expect(mockSqlFn).toHaveBeenCalled();
-      }
+    it('should return 0 when no eligible contacts exist', async () => {
+      mockSqlFn.mockImplementation(() => Promise.resolve([{ count: 0 }]));
+      const result = await getEligibleContactCount();
+      expect(result).toBe(0);
     });
 
-    it('should handle non-existent email gracefully', async () => {
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
-      await expect(
-        updateContactStatus('nonexistent@example.com', 'sent')
-      ).resolves.toBeUndefined();
-    });
-
-    it('should handle database update errors', async () => {
-      const dbError = new Error('Update failed');
+    it('should handle database query errors', async () => {
+      const dbError = new Error('Query failed');
       mockSqlFn.mockImplementation(() => Promise.reject(dbError));
-      await expect(updateContactStatus('test@example.com', 'sent')).rejects.toThrow(
-        'Update failed'
-      );
+      await expect(getEligibleContactCount()).rejects.toThrow('Query failed');
+    });
+  });
+
+  // ============================================================================
+  // Send Log Tests
+  // ============================================================================
+
+  describe('createSendLog()', () => {
+    it('should create a send log entry', async () => {
+      const mockLog = {
+        id: 'log-1',
+        contactId: 'contact-1',
+        status: 'pending',
+        mode: 'production',
+        subject: 'Test Subject',
+        bodyPreview: 'Test body preview...',
+        createdAt: new Date(),
+      };
+      mockSqlFn.mockImplementation(() => Promise.resolve([mockLog]));
+
+      const result = await createSendLog('contact-1', 'production', 'Test Subject', 'Test body preview...');
+
+      expect(result.contactId).toBe('contact-1');
+      expect(result.status).toBe('pending');
+      expect(result.mode).toBe('production');
+    });
+  });
+
+  describe('updateSendLog()', () => {
+    it('should update send log status to sent', async () => {
+      const mockLog = {
+        id: 'log-1',
+        contactId: 'contact-1',
+        status: 'sent',
+        mode: 'production',
+        subject: 'Test Subject',
+        bodyPreview: 'Test body preview...',
+        messageId: 'msg-123',
+        sentAt: new Date(),
+        createdAt: new Date(),
+      };
+      mockSqlFn.mockImplementation(() => Promise.resolve([mockLog]));
+
+      const result = await updateSendLog('log-1', {
+        status: 'sent',
+        messageId: 'msg-123',
+        sentAt: new Date(),
+      });
+
+      expect(result.status).toBe('sent');
+      expect(result.messageId).toBe('msg-123');
+    });
+
+    it('should update send log status to failed', async () => {
+      const mockLog = {
+        id: 'log-1',
+        contactId: 'contact-1',
+        status: 'failed',
+        mode: 'production',
+        subject: 'Test Subject',
+        bodyPreview: 'Test body preview...',
+        errorReason: 'SES API Error',
+        createdAt: new Date(),
+      };
+      mockSqlFn.mockImplementation(() => Promise.resolve([mockLog]));
+
+      const result = await updateSendLog('log-1', {
+        status: 'failed',
+        errorReason: 'SES API Error',
+      });
+
+      expect(result.status).toBe('failed');
+      expect(result.errorReason).toBe('SES API Error');
+    });
+  });
+
+  describe('getSendStats()', () => {
+    it('should return aggregate send statistics', async () => {
+      mockSqlFn
+        .mockImplementationOnce(() => Promise.resolve([{ count: 10 }])) // totalContacts
+        .mockImplementationOnce(() => Promise.resolve([{ count: 5 }]))  // eligibleForSending
+        .mockImplementationOnce(() => Promise.resolve([{ count: 2 }]))  // pendingSends
+        .mockImplementationOnce(() => Promise.resolve([{ count: 3 }]))  // sentLast24Hours
+        .mockImplementationOnce(() => Promise.resolve([{ count: 1 }]))  // failedLast24Hours
+        .mockImplementation(() => Promise.resolve([{ count: 0 }]));
+
+      const result = await getSendStats();
+
+      expect(result.totalContacts).toBe(10);
+      expect(result.eligibleForSending).toBe(5);
+      expect(result.pendingSends).toBe(2);
+      expect(result.sentLast24Hours).toBe(3);
+      expect(result.failedLast24Hours).toBe(1);
     });
   });
 

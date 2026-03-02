@@ -12,6 +12,9 @@ import type {
   ThrottleConfig,
   EmailSendParams,
   EmailSendResult,
+  SendLog,
+  LogStatus,
+  SendMode,
 } from '../../src/types.js';
 
 // ============================================================================
@@ -20,6 +23,7 @@ import type {
 
 /**
  * Factory function for creating a test contact
+ * Contacts are identity-only; send status is tracked in SendLog
  * @param overrides - Properties to override defaults
  * @returns Contact object
  */
@@ -30,7 +34,6 @@ export function createMockContact(overrides: Partial<Contact> = {}): Contact {
     companyName: 'Test Company Inc.',
     personName: 'John Doe',
     email: 'john.doe@testcompany.com',
-    status: 'pending',
     createdAt: timestamp,
     ...overrides,
   };
@@ -53,40 +56,76 @@ export function createMockContacts(count: number, overrides: Partial<Contact> = 
   );
 }
 
+// ============================================================================
+// Send Log Factories (replaces contact status tracking)
+// ============================================================================
+
 /**
- * Factory for pending contacts
- * @param overrides - Properties to override
- * @returns Pending contact
+ * Factory function for creating a send log entry
+ * @param overrides - Properties to override defaults
+ * @returns SendLog object
  */
-export function createPendingContact(overrides: Partial<Contact> = {}): Contact {
-  return createMockContact({ status: 'pending', ...overrides });
+export function createMockSendLog(overrides: Partial<SendLog> = {}): SendLog {
+  const timestamp = new Date();
+  return {
+    id: `sendlog-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    contactId: `contact-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    status: 'pending',
+    mode: 'production',
+    subject: 'Test Email Subject',
+    bodyPreview: 'This is a test email body preview...',
+    createdAt: timestamp,
+    ...overrides,
+  };
 }
 
 /**
- * Factory for sent contacts
+ * Factory for pending send log
  * @param overrides - Properties to override
- * @returns Sent contact
+ * @returns Pending send log
  */
-export function createSentContact(overrides: Partial<Contact> = {}): Contact {
-  return createMockContact({ status: 'sent', ...overrides });
+export function createPendingSendLog(overrides: Partial<SendLog> = {}): SendLog {
+  return createMockSendLog({ status: 'pending', ...overrides });
 }
 
 /**
- * Factory for invalid contacts
+ * Factory for sent send log
  * @param overrides - Properties to override
- * @returns Invalid contact
+ * @returns Sent send log
  */
-export function createInvalidContact(overrides: Partial<Contact> = {}): Contact {
-  return createMockContact({ status: 'invalid', ...overrides });
+export function createSentSendLog(overrides: Partial<SendLog> = {}): SendLog {
+  return createMockSendLog({
+    status: 'sent',
+    sentAt: new Date(),
+    messageId: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
+    ...overrides,
+  });
 }
 
 /**
- * Factory for failed contacts
+ * Factory for failed send log
  * @param overrides - Properties to override
- * @returns Failed contact
+ * @returns Failed send log
  */
-export function createFailedContact(overrides: Partial<Contact> = {}): Contact {
-  return createMockContact({ status: 'failed', ...overrides });
+export function createFailedSendLog(overrides: Partial<SendLog> = {}): SendLog {
+  return createMockSendLog({
+    status: 'failed',
+    errorReason: 'SES API Error: Rate limit exceeded',
+    ...overrides,
+  });
+}
+
+/**
+ * Factory for skipped send log
+ * @param overrides - Properties to override
+ * @returns Skipped send log
+ */
+export function createSkippedSendLog(overrides: Partial<SendLog> = {}): SendLog {
+  return createMockSendLog({
+    status: 'skipped',
+    errorReason: 'Email verification failed: invalid (high risk)',
+    ...overrides,
+  });
 }
 
 // ============================================================================
@@ -465,6 +504,9 @@ export function createMockImportResult(overrides: Partial<ImportResult> = {}): I
     totalRows: 10,
     successCount: 8,
     failedCount: 2,
+    insertedCount: 6,
+    skippedCount: 2,
+    existingCount: 2,
     errors: [
       { row: 3, error: 'Invalid email format' },
       { row: 7, error: 'Missing company name' },
