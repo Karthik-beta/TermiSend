@@ -74,8 +74,11 @@ export interface ContactInput {
  */
 export interface ImportResult {
   totalRows: number;
-  successCount: number;
+  successCount: number; // Kept for backward compatibility
   failedCount: number;
+  insertedCount: number; // New contacts inserted into DB
+  skippedCount: number; // Duplicates within the same file
+  existingCount: number; // Contacts already existing in DB
   errors: Array<{ row: number; error: string }>;
 }
 
