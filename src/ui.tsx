@@ -11,6 +11,7 @@ import React, { useCallback, useState } from 'react';
 import { getPendingContacts } from './db.js';
 import { importExcelFile } from './importer.js';
 import { generatePreview, runCampaign } from './mailer.js';
+import { generateTemplate } from './template-generator.js';
 import type { AppView, CampaignResult, Contact, ImportResult } from './types.js';
 
 // ============================================================================
@@ -23,6 +24,7 @@ type MenuItem = {
 };
 
 type ImportStatus = 'idle' | 'loading' | 'success' | 'error';
+type TemplateStatus = 'idle' | 'downloading' | 'success' | 'error';
 type CampaignStatus = 'idle' | 'loading' | 'preview' | 'confirm' | 'running' | 'success' | 'error';
 
 // ============================================================================
@@ -118,12 +120,42 @@ function ImportView({ onBack }: ImportViewProps): React.ReactElement {
   const [status, setStatus] = useState<ImportStatus>('idle');
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [templateStatus, setTemplateStatus] = useState<TemplateStatus>('idle');
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateFilePath, setTemplateFilePath] = useState<string | null>(null);
 
-  useInput((_input, key) => {
+  useInput((input, key) => {
     if (key.escape) {
       onBack();
     }
+    // Handle template download on 'T' key press (only when not typing a path)
+    if (
+      (input === 't' || input === 'T') &&
+      !filePath &&
+      status !== 'loading' &&
+      templateStatus === 'idle'
+    ) {
+      handleDownloadTemplate();
+    }
   });
+
+  // Empty deps: generateTemplate is stable, state setters are stable
+  const handleDownloadTemplate = useCallback(async () => {
+    setTemplateStatus('downloading');
+    setTemplateError(null);
+    setTemplateFilePath(null);
+
+    try {
+      const outputPath = './contacts-template.xlsx';
+
+      await generateTemplate(outputPath);
+      setTemplateFilePath(outputPath);
+      setTemplateStatus('success');
+    } catch (err) {
+      setTemplateError(err instanceof Error ? err.message : String(err));
+      setTemplateStatus('error');
+    }
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     if (!filePath.trim()) {
@@ -216,6 +248,34 @@ function ImportView({ onBack }: ImportViewProps): React.ReactElement {
           <Text dimColor={true}>Press Escape to go back</Text>
         </Box>
       )}
+      {/* Template download section */}
+      <Box marginTop={2} flexDirection="column" borderStyle="round" borderColor="blue" padding={1}>
+        <Text bold={true} color="blue">
+          Template Options
+        </Text>
+        <Box marginTop={1}>
+          <Text>Press </Text>
+          <Text bold={true} color="yellow">
+            T
+          </Text>
+          <Text> to download template</Text>
+        </Box>
+        {templateStatus === 'downloading' && (
+          <Box marginTop={1}>
+            <Text color="yellow">Generating template...</Text>
+          </Box>
+        )}
+        {templateStatus === 'success' && templateFilePath && (
+          <Box marginTop={1}>
+            <Text color="green">✓ Template saved to: {templateFilePath}</Text>
+          </Box>
+        )}
+        {templateStatus === 'error' && templateError && (
+          <Box marginTop={1}>
+            <Text color="red">✗ Template error: {templateError}</Text>
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 }

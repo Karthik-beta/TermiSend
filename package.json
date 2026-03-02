@@ -10,6 +10,7 @@
     "prod": "NODE_ENV=production bun run src/index.tsx",
     "build": "bun build ./src/index.tsx --outdir ./dist --target=bun",
     "db:init": "bun run src/db.ts",
+    "db:reset": "bun run src/db.ts reset",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write ."

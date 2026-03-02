@@ -26,7 +26,7 @@ type ValidatedContact = z.infer<typeof ContactSchema>;
 // Excel Column Mapping
 // ============================================================================
 
-const REQUIRED_COLUMNS = ['Company Name', 'Person Name', 'Email'] as const;
+export const REQUIRED_COLUMNS = ['Company Name', 'Person Name', 'Email'] as const;
 
 interface ExcelRow {
   'Company Name'?: string | number;
