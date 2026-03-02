@@ -8,7 +8,10 @@
 
 import postgres from 'postgres';
 import { getEnv } from './config.js';
-import type { AuditLog, Contact, JSONValue } from './types.js';
+import type { AuditLog, Contact, EmailVerifierCredits, JSONValue } from './types.js';
+
+// Fixed singleton ID for the email_verifier_credits table (singleton pattern)
+const EMAIL_VERIFIER_CREDITS_SINGLETON_ID = '00000000-0000-0000-0000-000000000001';
 
 // ============================================================================
 // Lazy PostgreSQL Client Setup
@@ -167,6 +170,15 @@ export async function initializeSchema(): Promise<void> {
     await sql`
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)
     `;
+
+    // Create email_verifier_credits table for tracking MyEmailVerifier credits
+    await sql`
+      CREATE TABLE IF NOT EXISTS email_verifier_credits (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        credits INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
   } catch (error) {
     throw new Error(
       `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
@@ -293,6 +305,48 @@ export async function getAuditLogs(eventType?: string, limit: number = 100): Pro
     ORDER BY created_at DESC
     LIMIT ${limit}
   `;
+}
+
+// ============================================================================
+// Email Verifier Credits Operations
+// ============================================================================
+
+/**
+ * Get the current MyEmailVerifier credits
+ * Returns the most recent credits record, or null if none exists
+ */
+export async function getEmailVerifierCredits(): Promise<EmailVerifierCredits | null> {
+  const [credits] = await sql<EmailVerifierCredits[]>`
+    SELECT * FROM email_verifier_credits
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `;
+  return credits || null;
+}
+
+/**
+ * Update MyEmailVerifier credits in the database
+ * Uses atomic UPSERT pattern with singleton row (fixed ID) to prevent race conditions
+ */
+export async function updateEmailVerifierCredits(credits: number): Promise<EmailVerifierCredits> {
+  // Validate input: credits must be a non-negative integer
+  if (!Number.isInteger(credits) || credits < 0) {
+    throw new Error(`Invalid credits value: ${credits}. Credits must be a non-negative integer.`);
+  }
+
+  // Use fixed singleton ID for the credits record
+  const SingletonId = EMAIL_VERIFIER_CREDITS_SINGLETON_ID;
+
+  // Atomic UPSERT: INSERT ... ON CONFLICT ... DO UPDATE
+  const [result] = await sql<EmailVerifierCredits[]>`
+    INSERT INTO email_verifier_credits (id, credits, updated_at)
+    VALUES (${SingletonId}, ${credits}, CURRENT_TIMESTAMP)
+    ON CONFLICT (id) DO UPDATE
+    SET credits = ${credits}, updated_at = CURRENT_TIMESTAMP
+    RETURNING *
+  `;
+
+  return result;
 }
 
 // ============================================================================

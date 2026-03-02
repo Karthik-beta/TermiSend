@@ -94,6 +94,22 @@ export interface EmailVerificationResponse {
   [key: string]: string | undefined;
 }
 
+/**
+ * Response from MyEmailVerifier Credits API
+ */
+export interface EmailVerifierCreditsResponse {
+  Credits: string;
+}
+
+/**
+ * Represents MyEmailVerifier credits in the database
+ */
+export interface EmailVerifierCredits {
+  id: string;
+  credits: number;
+  updatedAt: Date;
+}
+
 // ============================================================================
 // AWS SES Types
 // ============================================================================

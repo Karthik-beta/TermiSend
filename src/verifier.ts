@@ -4,6 +4,7 @@
  */
 
 import { getEnv } from './config.js';
+import { updateEmailVerifierCredits } from './db.js';
 import { logger } from './logger.js';
 import type { EmailVerificationResponse } from './types.js';
 import {
@@ -24,6 +25,36 @@ const API_BASE_URL = 'https://api.myemailverifier.com/v1';
  * Max 1 request per 5 seconds per email
  */
 const verificationRateLimiter = new RateLimiter(5000, 1);
+
+// ============================================================================
+// Credits Update Error Tracking
+// ============================================================================
+
+/**
+ * Maximum number of retry attempts for credits update failures
+ */
+const MAX_CREDITS_UPDATE_RETRIES = 3;
+
+/**
+ * Counter for consecutive credits update failures
+ * Used to detect persistent issues with credits API
+ */
+let creditsUpdateFailureCount = 0;
+
+/**
+ * Flag indicating if credits updates are consistently failing
+ * Can be checked by monitoring/alerting systems
+ */
+export let isCreditsUpdateFailing = false;
+
+/**
+ * Reset the credits update failure tracking
+ * Call this after successful recovery or manual intervention
+ */
+export function resetCreditsUpdateFailureTracking(): void {
+  creditsUpdateFailureCount = 0;
+  isCreditsUpdateFailing = false;
+}
 
 /**
  * Get API key dynamically (not cached)
@@ -122,6 +153,14 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
     const responseData: Record<string, unknown> = { ...validatedData };
     await logger.logApiVerifierResponse(email, responseData);
 
+    // Event-driven: Fetch and update credits after each verification API call
+    // This is intentionally fire-and-forget (non-blocking) and best-effort.
+    // Credit tracking is not critical path - verification response is returned immediately.
+    // Failures are logged but don't block the user-facing verification flow.
+    syncCreditsAfterVerification().catch(() => {
+      // Ignore promise rejection - errors are handled internally
+    });
+
     return validatedData;
   } catch (error) {
     // Don't log the full email in error messages (security)
@@ -135,6 +174,102 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
     // Re-throw the error to allow caller to handle it appropriately
     // Use redacted email in error message for security
     throw new Error(`Email verification failed for ${redactEmail(email)}: ${errorMessage}`);
+  }
+}
+
+/**
+ * Fetch MyEmailVerifier credits from the API
+ * This is called event-driven after each verification to track remaining credits
+ *
+ * @returns Number of credits remaining, or null if fetch fails
+ */
+export async function fetchVerifierCredits(): Promise<number | null> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    await logger.warn('MYEMAILVERIFIER_API_KEY not configured, cannot fetch credits');
+    return null;
+  }
+
+  const url = `https://client.myemailverifier.com/verifier/getcredits/${apiKey}`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      await logger.warn(`Credits API request failed: ${response.status} - ${errorText}`);
+      return null;
+    }
+
+    const data: unknown = await response.json();
+
+    // Validate response has Credits field
+    if (typeof data === 'object' && data !== null && 'Credits' in data) {
+      const credits = Number.parseInt((data as { Credits: string }).Credits, 10);
+      if (!Number.isNaN(credits)) {
+        await logger.info(`MyEmailVerifier credits fetched: ${credits}`);
+        return credits;
+      }
+    }
+
+    await logger.warn(`Invalid credits response format: ${JSON.stringify(data)}`);
+    return null;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await logger.warn(`Error fetching MyEmailVerifier credits: ${errorMessage}`);
+    return null;
+  }
+}
+
+/**
+ * Sync credits after verification - fire-and-forget operation
+ * Updates the database with current credit balance from the API
+ * Failures are tracked but don't block the verification flow
+ */
+async function syncCreditsAfterVerification(): Promise<void> {
+  try {
+    const credits = await fetchVerifierCredits();
+    if (credits !== null) {
+      // Reset failure tracking on success
+      creditsUpdateFailureCount = 0;
+      isCreditsUpdateFailing = false;
+      await updateEmailVerifierCredits(credits);
+    }
+  } catch (err) {
+    // Track consecutive failures and enforce retry limit
+    creditsUpdateFailureCount += 1;
+
+    if (creditsUpdateFailureCount >= MAX_CREDITS_UPDATE_RETRIES) {
+      isCreditsUpdateFailing = true;
+      logger
+        .logError(
+          'Credits Update - Post-verification sync',
+          err instanceof Error ? err : new Error(String(err)),
+          {
+            consecutiveFailures: creditsUpdateFailureCount,
+            retryLimit: MAX_CREDITS_UPDATE_RETRIES,
+            message: `Credits update consistently failing after ${MAX_CREDITS_UPDATE_RETRIES} attempts. Consider checking MyEmailVerifier API status or credentials.`,
+          }
+        )
+        .catch(() => {
+          // Ignore logging errors
+        });
+    } else {
+      logger
+        .warn(
+          `Failed to update credits (attempt ${creditsUpdateFailureCount}/${MAX_CREDITS_UPDATE_RETRIES}): ` +
+            'Context: post-verification credits sync. ' +
+            `Error: ${err instanceof Error ? err.message : String(err)}`
+        )
+        .catch(() => {
+          // Ignore logging errors
+        });
+    }
   }
 }
 
