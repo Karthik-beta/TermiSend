@@ -6,7 +6,7 @@
 /** @jsxImportSource react */
 import { render } from 'ink';
 import { closeConnection, initializeSchema } from './db.js';
-import App from './ui.js';
+import App from './ui/index.js';
 
 // ============================================================================
 // Application Entry Point
@@ -14,7 +14,9 @@ import App from './ui.js';
 
 async function main(): Promise<void> {
   try {
+    console.log('🚀 Starting TermiSend...');
     await initializeSchema();
+    console.log('✓ Database connected');
 
     // Render the Ink UI
     const { waitUntilExit } = render(<App />);
@@ -26,7 +28,12 @@ async function main(): Promise<void> {
     await closeConnection();
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('Failed to start application:', errorMessage);
+    console.error('❌ Failed to start TermiSend');
+    console.error(`   Error: ${errorMessage}`);
+    console.error('   Check:');
+    console.error('     1. DATABASE_URL in .env file');
+    console.error('     2. PostgreSQL is running');
+    console.error('     3. AWS credentials are configured');
     process.exit(1);
   }
 }
@@ -50,7 +57,10 @@ process.on('SIGINT', () => {
       process.exitCode = 0;
     })
     .catch((error) => {
-      console.error('Error during shutdown:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('❌ Error during shutdown');
+      console.error(`   Error: ${errorMessage}`);
+      console.error('   Note: Data has been preserved');
       process.exitCode = 1;
     });
 });
@@ -66,7 +76,10 @@ process.on('SIGTERM', () => {
       process.exitCode = 0;
     })
     .catch((error) => {
-      console.error('Error during shutdown:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('❌ Error during shutdown');
+      console.error(`   Error: ${errorMessage}`);
+      console.error('   Note: Data has been preserved');
       process.exitCode = 1;
     });
 });

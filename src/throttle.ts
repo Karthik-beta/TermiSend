@@ -525,9 +525,12 @@ export class EmailThrottleController {
   /**
    * Calculate and wait for the appropriate delay before sending
    *
+   * @param onProgress - Optional callback called every second with remaining wait time
    * @returns DelayResult with information about the delay
    */
-  async waitBeforeSend(): Promise<DelayResult> {
+  async waitBeforeSend(
+    onProgress?: (remainingMs: number, totalMs: number) => void
+  ): Promise<DelayResult> {
     // Get fresh config
     this.config = getThrottleConfig();
 
@@ -539,8 +542,35 @@ export class EmailThrottleController {
       `Throttle delay: waiting ${delayResult.totalDelayMs}ms before next send (base=${delayResult.baseDelayMs}ms, break=${delayResult.breakTriggered})`
     );
 
-    // Execute the delay
-    await delay(delayResult.totalDelayMs);
+    // Execute the delay with progress callbacks if provided
+    if (onProgress && delayResult.totalDelayMs > 0) {
+      const totalMs = delayResult.totalDelayMs;
+      const startTime = Date.now();
+      const endTime = startTime + totalMs;
+
+      // Call progress immediately with full time
+      onProgress(totalMs, totalMs);
+
+      // Progress update interval (every second)
+      const progressIntervalMs = 1000;
+
+      while (Date.now() < endTime) {
+        const remainingMs = Math.max(0, endTime - Date.now());
+        onProgress(remainingMs, totalMs);
+
+        // Wait for next interval or until end
+        const waitMs = Math.min(progressIntervalMs, remainingMs);
+        if (waitMs > 0) {
+          await delay(waitMs);
+        }
+      }
+
+      // Final call with 0 remaining
+      onProgress(0, totalMs);
+    } else {
+      // Execute the delay without progress updates
+      await delay(delayResult.totalDelayMs);
+    }
 
     return delayResult;
   }

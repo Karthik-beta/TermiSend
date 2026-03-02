@@ -28,7 +28,9 @@ export function loadEnv(): Record<string, string> {
     const result = config({ path: envPath });
 
     if (result.error) {
-      console.warn(`Warning: Could not load ${envFile}:`, result.error.message);
+      console.warn(`⚠️  Could not load ${envFile}`);
+      console.warn('   This is optional - using existing environment variables');
+      console.warn(`   To create: cp .env.example ${envFile}`);
       return {};
     }
 

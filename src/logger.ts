@@ -33,7 +33,12 @@ export interface Logger {
   logApiVerifierResponse(email: string, response: Record<string, unknown>): Promise<void>;
   logAwsSesRequest(email: string, params: Record<string, unknown>): Promise<void>;
   logAwsSesResponse(email: string, messageId: string): Promise<void>;
-  logContactUpdated(email: string, oldStatus: string, newStatus: string): Promise<void>;
+  logSendLogUpdated(
+    logId: string,
+    oldStatus: string,
+    newStatus: string,
+    additionalData?: Record<string, unknown>
+  ): Promise<void>;
   logError(
     context: string,
     error: Error | string,
@@ -62,7 +67,10 @@ class AuditLogger implements Logger {
     } catch (error) {
       // Fallback to console only if database logging fails
       // This should not happen in normal operation
-      console.error('Failed to write audit log:', error);
+      console.error('❌ Failed to write audit log');
+      console.error(`   Operation: ${eventType}`);
+      console.error(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+      console.error('   Check database connection');
     }
   }
 
@@ -187,14 +195,20 @@ class AuditLogger implements Logger {
   }
 
   /**
-   * Log contact status update
-   * Email is redacted for privacy
+   * Log send log status update
+   * Tracks changes to send_log entries for audit purposes
    */
-  async logContactUpdated(email: string, oldStatus: string, newStatus: string): Promise<void> {
-    await this.logEvent('CONTACT_UPDATED', {
-      email: redactEmail(email),
+  async logSendLogUpdated(
+    logId: string,
+    oldStatus: string,
+    newStatus: string,
+    additionalData?: Record<string, unknown>
+  ): Promise<void> {
+    await this.logEvent('SEND_LOG_UPDATED', {
+      logId,
       oldStatus,
       newStatus,
+      ...additionalData,
     });
   }
 
@@ -222,8 +236,8 @@ class AuditLogger implements Logger {
 
     // In development mode, also log to console with stack trace for debugging
     if (isDevelopment() && error instanceof Error && error.stack) {
-      console.error(`[${context}] ${errorType}:`, errorMessage);
-      console.error('Stack trace:', error.stack);
+      console.error(`❌ [${context}] ${errorType}:`, errorMessage);
+      console.error('   Stack trace:', error.stack);
     }
   }
 
@@ -270,5 +284,5 @@ export const logApiVerifierRequest = logger.logApiVerifierRequest.bind(logger);
 export const logApiVerifierResponse = logger.logApiVerifierResponse.bind(logger);
 export const logAwsSesRequest = logger.logAwsSesRequest.bind(logger);
 export const logAwsSesResponse = logger.logAwsSesResponse.bind(logger);
-export const logContactUpdated = logger.logContactUpdated.bind(logger);
+export const logSendLogUpdated = logger.logSendLogUpdated.bind(logger);
 export const logError = logger.logError.bind(logger);

@@ -8,7 +8,16 @@
 
 import postgres from 'postgres';
 import { getEnv } from './config.js';
-import type { AuditLog, Contact, EmailVerifierCredits, JSONValue } from './types.js';
+import type {
+  AuditLog,
+  Contact,
+  EmailVerifierCredits,
+  JSONValue,
+  LogStatus,
+  SendLog,
+  SendMode,
+  SendStats,
+} from './types.js';
 import { isProduction } from './utils/security.js';
 
 // Fixed singleton ID for the email_verifier_credits table (singleton pattern)
@@ -130,14 +139,13 @@ export const sql: ReturnType<typeof postgres> = new Proxy(
  */
 export async function initializeSchema(): Promise<void> {
   try {
-    // Create contacts table
+    // Create contacts table (identity only, no status)
     await sql`
       CREATE TABLE IF NOT EXISTS contacts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         company_name VARCHAR(255) NOT NULL,
         person_name VARCHAR(255) NOT NULL,
         email VARCHAR(255) UNIQUE NOT NULL,
-        status VARCHAR(50) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `;
@@ -147,9 +155,35 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)
     `;
 
-    // Create index on status for filtering
+    // Create send_logs table for tracking email send attempts
     await sql`
-      CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status)
+      CREATE TABLE IF NOT EXISTS send_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        campaign_id UUID,
+        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        mode VARCHAR(50) NOT NULL DEFAULT 'production',
+        subject VARCHAR(500) NOT NULL,
+        body_preview VARCHAR(500) NOT NULL,
+        error_reason TEXT,
+        message_id VARCHAR(255),
+        sent_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create indexes on send_logs for efficient queries
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_logs_contact_id ON send_logs(contact_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_logs_status ON send_logs(status)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_logs_created_at ON send_logs(created_at)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_logs_campaign_id ON send_logs(campaign_id)
     `;
 
     // Create audit_logs table
@@ -180,6 +214,14 @@ export async function initializeSchema(): Promise<void> {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `;
+
+    // Success message for CLI usage
+    if (require.main === module || process.argv[1]?.includes('db.ts')) {
+      const dbConfig = getDbConfig();
+      console.log('✅ Database initialized successfully!');
+      console.log(`   Database: ${dbConfig.database}`);
+      console.log('   Tables: contacts, send_logs, audit_logs, email_verifier_credits');
+    }
   } catch (error) {
     throw new Error(
       `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
@@ -200,12 +242,11 @@ export async function insertContact(
   email: string
 ): Promise<Contact> {
   const [contact] = await sql<Contact[]>`
-    INSERT INTO contacts (company_name, person_name, email, status)
-    VALUES (${companyName}, ${personName}, ${email}, 'pending')
+    INSERT INTO contacts (company_name, person_name, email)
+    VALUES (${companyName}, ${personName}, ${email})
     ON CONFLICT (email) DO UPDATE SET
       company_name = EXCLUDED.company_name,
-      person_name = EXCLUDED.person_name,
-      status = 'pending'
+      person_name = EXCLUDED.person_name
     RETURNING *
   `;
   return contact;
@@ -221,8 +262,8 @@ export async function insertContactSkipDuplicate(
   email: string
 ): Promise<boolean> {
   const result = await sql<Contact[]>`
-    INSERT INTO contacts (company_name, person_name, email, status)
-    VALUES (${companyName}, ${personName}, ${email}, 'pending')
+    INSERT INTO contacts (company_name, person_name, email)
+    VALUES (${companyName}, ${personName}, ${email})
     ON CONFLICT (email) DO NOTHING
     RETURNING *
   `;
@@ -230,16 +271,9 @@ export async function insertContactSkipDuplicate(
 }
 
 /**
- * Get all contacts with optional status filter
+ * Get all contacts
  */
-export async function getContacts(status?: string): Promise<Contact[]> {
-  if (status) {
-    return await sql<Contact[]>`
-      SELECT * FROM contacts
-      WHERE status = ${status}
-      ORDER BY created_at DESC
-    `;
-  }
+export async function getContacts(): Promise<Contact[]> {
   return await sql<Contact[]>`
     SELECT * FROM contacts
     ORDER BY created_at DESC
@@ -247,25 +281,40 @@ export async function getContacts(status?: string): Promise<Contact[]> {
 }
 
 /**
- * Get pending contacts for email campaign
+ * Get contacts that are eligible for sending
+ * A contact is eligible if it has no successful 'sent' log entry
+ * In dev/test mode, this allows retries
+ *
+ * @param limit - Maximum number of contacts to return (default: 1000)
+ * @returns Array of eligible contacts
  */
-export async function getPendingContacts(): Promise<Contact[]> {
+export async function getEligibleContacts(limit: number = 1000): Promise<Contact[]> {
   return await sql<Contact[]>`
-    SELECT * FROM contacts
-    WHERE status = 'pending'
-    ORDER BY created_at ASC
+    SELECT c.* FROM contacts c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'sent'
+    )
+    ORDER BY c.created_at ASC
+    LIMIT ${limit}
   `;
 }
 
 /**
- * Update contact status
+ * Get count of eligible contacts for sending
  */
-export async function updateContactStatus(email: string, status: Contact['status']): Promise<void> {
-  await sql`
-    UPDATE contacts 
-    SET status = ${status}
-    WHERE email = ${email}
+export async function getEligibleContactCount(): Promise<number> {
+  const [result] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count
+    FROM contacts c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'sent'
+    )
   `;
+  return result?.count ?? 0;
 }
 
 /**
@@ -276,6 +325,131 @@ export async function contactExists(email: string): Promise<boolean> {
     SELECT EXISTS(SELECT 1 FROM contacts WHERE email = ${email})
   `;
   return result?.exists ?? false;
+}
+
+// ============================================================================
+// Send Log Operations
+// ============================================================================
+
+/**
+ * Create a new send log entry with pending status
+ */
+export async function createSendLog(
+  contactId: string,
+  mode: SendMode,
+  subject: string,
+  bodyPreview: string,
+  campaignId?: string
+): Promise<SendLog> {
+  const [log] = await sql<SendLog[]>`
+    INSERT INTO send_logs (contact_id, campaign_id, status, mode, subject, body_preview)
+    VALUES (${contactId}, ${campaignId ?? null}, 'pending', ${mode}, ${subject}, ${bodyPreview})
+    RETURNING *
+  `;
+  return log;
+}
+
+/**
+ * Update a send log entry with result information
+ */
+export async function updateSendLog(
+  logId: string,
+  updates: {
+    status: LogStatus;
+    messageId?: string;
+    errorReason?: string;
+    sentAt?: Date;
+  }
+): Promise<SendLog> {
+  const [log] = await sql<SendLog[]>`
+    UPDATE send_logs
+    SET 
+      status = ${updates.status},
+      message_id = ${updates.messageId ?? null},
+      error_reason = ${updates.errorReason ?? null},
+      sent_at = ${updates.sentAt ?? null}
+    WHERE id = ${logId}
+    RETURNING *
+  `;
+  return log;
+}
+
+/**
+ * Get send logs for a specific contact
+ */
+export async function getContactSendLogs(contactId: string): Promise<SendLog[]> {
+  return await sql<SendLog[]>`
+    SELECT * FROM send_logs
+    WHERE contact_id = ${contactId}
+    ORDER BY created_at DESC
+  `;
+}
+
+/**
+ * Get pending send logs (for recovery/resume scenarios)
+ */
+export async function getPendingSendLogs(mode?: SendMode): Promise<SendLog[]> {
+  if (mode) {
+    return await sql<SendLog[]>`
+      SELECT * FROM send_logs
+      WHERE status = 'pending'
+      AND mode = ${mode}
+      ORDER BY created_at ASC
+    `;
+  }
+  return await sql<SendLog[]>`
+    SELECT * FROM send_logs
+    WHERE status = 'pending'
+    ORDER BY created_at ASC
+  `;
+}
+
+/**
+ * Get aggregate send statistics for UI display
+ */
+export async function getSendStats(): Promise<SendStats> {
+  const [totalResult] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count FROM contacts
+  `;
+
+  const [eligibleResult] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count
+    FROM contacts c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'sent'
+    )
+  `;
+
+  const [pendingResult] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count
+    FROM send_logs
+    WHERE status = 'pending'
+  `;
+
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [sent24hResult] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count
+    FROM send_logs
+    WHERE status = 'sent'
+    AND sent_at >= ${twentyFourHoursAgo}
+  `;
+
+  const [failed24hResult] = await sql<{ count: number }[]>`
+    SELECT COUNT(*) as count
+    FROM send_logs
+    WHERE status = 'failed'
+    AND created_at >= ${twentyFourHoursAgo}
+  `;
+
+  return {
+    totalContacts: totalResult?.count ?? 0,
+    eligibleForSending: eligibleResult?.count ?? 0,
+    pendingSends: pendingResult?.count ?? 0,
+    sentLast24Hours: sent24hResult?.count ?? 0,
+    failedLast24Hours: failed24hResult?.count ?? 0,
+  };
 }
 
 // ============================================================================
@@ -469,7 +643,7 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
     // IMPORTANT: When new tables are added to the database schema, they must be
     // added to this TRUNCATE list to ensure complete database resets.
     await sql`
-      TRUNCATE TABLE contacts, audit_logs, email_verifier_credits
+      TRUNCATE TABLE contacts, send_logs, audit_logs, email_verifier_credits
       RESTART IDENTITY CASCADE
     `;
 
@@ -519,10 +693,14 @@ async function runStandalone(): Promise<void> {
       await closeConnection();
       process.exit(0);
     } catch (error) {
-      console.error(
-        '✗ Database reset failed:',
-        error instanceof Error ? error.message : String(error)
-      );
+      const dbConfig = getDbConfig();
+      console.error('❌ Database reset failed');
+      console.error(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`   Connection: ${dbConfig.host}:${dbConfig.port}`);
+      console.error('   Check:');
+      console.error('     1. DATABASE_URL in .env file');
+      console.error('     2. PostgreSQL is running');
+      console.error('     3. User has permissions to truncate tables');
       process.exit(1);
     }
     return;
@@ -534,10 +712,14 @@ async function runStandalone(): Promise<void> {
     await closeConnection();
     process.exit(0);
   } catch (error) {
-    console.error(
-      '✗ Failed to initialize database:',
-      error instanceof Error ? error.message : String(error)
-    );
+    const dbConfig = getDbConfig();
+    console.error('❌ Database initialization failed');
+    console.error(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`   Connection: ${dbConfig.host}:${dbConfig.port}`);
+    console.error('   Check:');
+    console.error('     1. DATABASE_URL in .env file');
+    console.error('     2. PostgreSQL is running');
+    console.error('     3. Database user has CREATE TABLE permissions');
     process.exit(1);
   }
 }
@@ -553,13 +735,15 @@ const isDbEntryPoint = (): boolean => {
     return false;
   }
 
-  // Normalize both paths for comparison (case-insensitive for Windows)
-  const entryUrl = pathToFileURL(entryPoint).href.toLowerCase();
-  const dbUrl = pathToFileURL(`${process.cwd()}/src/db.ts`).href.toLowerCase();
+  // Convert both paths to file URLs for comparison
+  const currentFileUrl = pathToFileURL(import.meta.filename).href;
+  const entryPointUrl = pathToFileURL(entryPoint).href;
 
-  return entryUrl === dbUrl;
+  return currentFileUrl === entryPointUrl;
 };
 
 if (isDbEntryPoint()) {
-  runStandalone();
+  runStandalone().catch((err) => {
+    console.error('Failed to run standalone:', err);
+  });
 }

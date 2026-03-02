@@ -5,7 +5,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { marked } from 'marked';
-import { getPendingContacts, updateContactStatus } from './db.js';
+import { createSendLog, getEligibleContacts, updateSendLog } from './db.js';
 import { logger } from './logger.js';
 import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
@@ -15,6 +15,9 @@ import type {
   Contact,
   EmailSendParams,
   EmailVerificationResponse,
+  ProgressCallback,
+  SendMode,
+  SendProgress,
 } from './types.js';
 import { getSafeFilename } from './utils/security.js';
 import { isEmailSafe, verifyEmail } from './verifier.js';
@@ -22,8 +25,9 @@ import { isEmailSafe, verifyEmail } from './verifier.js';
 // Test-only exports for dependency injection
 // Use regular properties (not getters) so Bun's spyOn can mock them
 export const __test = {
-  getPendingContacts: getPendingContacts,
-  updateContactStatus: updateContactStatus,
+  getEligibleContacts: getEligibleContacts,
+  createSendLog: createSendLog,
+  updateSendLog: updateSendLog,
   sendEmail: sendEmail,
   verifyEmail: verifyEmail,
   emailThrottleController: EmailThrottleController,
@@ -34,24 +38,46 @@ export const __test = {
 // Spintax Parser
 // ============================================================================
 
+/** Maximum input length for spintax parsing (100KB) */
+const MAX_SPINTAX_INPUT_LENGTH = 100_000;
+
+/** Maximum nesting depth for spintax groups */
+const MAX_SPINTAX_DEPTH = 50;
+
+/** Maximum iterations to prevent infinite loops */
+const MAX_SPINTAX_ITERATIONS = 100;
+
 /**
  * Parse spintax syntax and generate a random variation
  * Supports nested spintax: {Hello|Hi {there|friend}}
  *
  * @param text - Text containing spintax
  * @returns Rendered text with random selections
+ * @throws Error if input exceeds limits or nesting is too deep
  */
 export function parseSpintax(text: string): string {
+  // Validate input length to prevent memory issues
+  if (text.length > MAX_SPINTAX_INPUT_LENGTH) {
+    throw new Error(
+      `Spintax input too long: ${text.length} characters (max: ${MAX_SPINTAX_INPUT_LENGTH})`
+    );
+  }
+
+  // Check maximum nesting depth before processing
+  const depth = calculateNestingDepth(text);
+  if (depth > MAX_SPINTAX_DEPTH) {
+    throw new Error(`Spintax nesting too deep: ${depth} levels (max: ${MAX_SPINTAX_DEPTH})`);
+  }
+
   // Regex to match spintax groups: {option1|option2|option3}
   const spintaxRegex = /\{([^{}]+)\}/g;
 
   // Maximum iterations to prevent infinite loops on malformed input
   let iterations = 0;
-  const maxIterations = 100;
 
   let result = text;
 
-  while (spintaxRegex.test(result) && iterations < maxIterations) {
+  while (spintaxRegex.test(result) && iterations < MAX_SPINTAX_ITERATIONS) {
     result = result.replace(spintaxRegex, (_match, content: string) => {
       // Split by pipe character, but handle nested braces
       const options = splitOptions(content);
@@ -63,6 +89,26 @@ export function parseSpintax(text: string): string {
   }
 
   return result;
+}
+
+/**
+ * Calculate the maximum nesting depth of spintax braces
+ * This prevents stack overflow from deeply nested patterns like {{{{{...}}}}}
+ */
+function calculateNestingDepth(text: string): number {
+  let maxDepth = 0;
+  let currentDepth = 0;
+
+  for (const char of text) {
+    if (char === '{') {
+      currentDepth++;
+      maxDepth = Math.max(maxDepth, currentDepth);
+    } else if (char === '}') {
+      currentDepth--;
+    }
+  }
+
+  return maxDepth;
 }
 
 /**
@@ -199,21 +245,6 @@ export function generatePlainText(markdown: string): string {
 // ============================================================================
 
 /**
- * Mark all contacts as failed due to quota exhaustion
- */
-async function markAllContactsAsFailed(contacts: Contact[], result: CampaignResult): Promise<void> {
-  for (const contact of contacts) {
-    result.failedCount++;
-    result.details.push({
-      email: contact.email,
-      status: 'failed',
-      reason: 'SES quota near exhaustion. Campaign aborted.',
-    });
-    await updateContactStatus(contact.email, 'failed');
-  }
-}
-
-/**
  * Result of email verification for a contact
  */
 interface VerificationOutcome {
@@ -223,10 +254,12 @@ interface VerificationOutcome {
 
 /**
  * Verify a contact's email and handle verification errors
+ * Creates a failed send log entry on verification failure
  */
 async function verifyContactEmail(
   contact: Contact,
-  result: CampaignResult
+  result: CampaignResult,
+  sendLogId: string
 ): Promise<VerificationOutcome> {
   try {
     const verificationResult = await verifyEmail(contact.email);
@@ -239,7 +272,11 @@ async function verifyContactEmail(
       status: 'failed',
       reason: `Email verification failed: ${errorMsg}`,
     });
-    await updateContactStatus(contact.email, 'failed');
+    // Update send log with failure
+    await updateSendLog(sendLogId, {
+      status: 'failed',
+      errorReason: `Email verification failed: ${errorMsg}`,
+    });
     await logger.logError('Email Verification', errorMsg, { email: contact.email });
     return { shouldContinue: false };
   }
@@ -247,11 +284,13 @@ async function verifyContactEmail(
 
 /**
  * Handle unsafe email - mark as skipped
+ * Updates send log with 'skipped' status
  */
 async function handleUnsafeEmail(
   contact: Contact,
   verificationResult: EmailVerificationResponse,
-  result: CampaignResult
+  result: CampaignResult,
+  sendLogId: string
 ): Promise<void> {
   result.skippedCount++;
   result.details.push({
@@ -259,29 +298,54 @@ async function handleUnsafeEmail(
     status: 'skipped',
     reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
   });
-  await updateContactStatus(contact.email, 'invalid');
-  await logger.logContactUpdated(contact.email, 'pending', 'invalid');
+  // Update send log with skipped status
+  await updateSendLog(sendLogId, {
+    status: 'skipped',
+    errorReason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
+  });
+  await logger.logSendLogUpdated(sendLogId, 'pending', 'skipped', {
+    email: contact.email,
+    reason: `Email verification failed: ${verificationResult.status}`,
+  });
 }
 
 /**
  * Handle dry run for a contact
+ * Updates send log to reflect dry run completion
  */
-function handleDryRun(contact: Contact, result: CampaignResult): void {
+async function handleDryRun(
+  contact: Contact,
+  result: CampaignResult,
+  sendLogId: string,
+  subject: string
+): Promise<void> {
   result.sentCount++;
   result.details.push({
     email: contact.email,
     status: 'sent',
     reason: 'DRY RUN - Email not actually sent',
   });
+  // Update send log with dry run status (marked as sent for tracking)
+  await updateSendLog(sendLogId, {
+    status: 'sent',
+  });
+  await logger.logSendLogUpdated(sendLogId, 'pending', 'sent', {
+    email: contact.email,
+    subject,
+    mode: 'dry_run',
+  });
 }
 
 /**
  * Handle successful email send
+ * Updates send log with 'sent' status and message ID
  */
 async function handleSuccessfulSend(
   contact: Contact,
   messageId: string,
-  result: CampaignResult
+  result: CampaignResult,
+  sendLogId: string,
+  subject: string
 ): Promise<void> {
   result.sentCount++;
   result.details.push({
@@ -289,17 +353,29 @@ async function handleSuccessfulSend(
     status: 'sent',
     reason: `MessageId: ${messageId}`,
   });
-  await updateContactStatus(contact.email, 'sent');
-  await logger.logContactUpdated(contact.email, 'pending', 'sent');
+  // Update send log with success
+  await updateSendLog(sendLogId, {
+    status: 'sent',
+    messageId,
+    sentAt: new Date(),
+  });
+  await logger.logSendLogUpdated(sendLogId, 'pending', 'sent', {
+    email: contact.email,
+    subject,
+    messageId,
+  });
 }
 
 /**
  * Handle failed email send
+ * Updates send log with 'failed' status and error reason
  */
 async function handleFailedSend(
   contact: Contact,
   errorReason: string,
-  result: CampaignResult
+  result: CampaignResult,
+  sendLogId: string,
+  subject: string
 ): Promise<void> {
   result.failedCount++;
   result.details.push({
@@ -307,17 +383,27 @@ async function handleFailedSend(
     status: 'failed',
     reason: errorReason,
   });
-  await updateContactStatus(contact.email, 'failed');
-  await logger.logContactUpdated(contact.email, 'pending', 'failed');
+  // Update send log with failure
+  await updateSendLog(sendLogId, {
+    status: 'failed',
+    errorReason,
+  });
+  await logger.logSendLogUpdated(sendLogId, 'pending', 'failed', {
+    email: contact.email,
+    subject,
+    error: errorReason,
+  });
 }
 
 /**
  * Handle contact processing error
+ * Updates send log with 'failed' status
  */
 async function handleContactError(
   contact: Contact,
   error: unknown,
-  result: CampaignResult
+  result: CampaignResult,
+  sendLogId: string
 ): Promise<void> {
   const errorMsg = error instanceof Error ? error.message : String(error);
   result.failedCount++;
@@ -330,44 +416,137 @@ async function handleContactError(
     email: contact.email,
     contact: { companyName: contact.companyName, personName: contact.personName },
   });
-  await updateContactStatus(contact.email, 'failed');
+  // Update send log with failure
+  await updateSendLog(sendLogId, {
+    status: 'failed',
+    errorReason: errorMsg,
+  });
+}
+
+/**
+ * Helper to safely call progress callback
+ */
+async function reportProgress(
+  onProgress: ProgressCallback | undefined,
+  progress: SendProgress
+): Promise<void> {
+  if (onProgress) {
+    try {
+      await onProgress(progress);
+    } catch {
+      // Silently ignore progress callback errors to not disrupt sending
+    }
+  }
 }
 
 /**
  * Process a single contact - send email after verification
+ * Creates send log entry before processing and updates it based on outcome
  */
 async function processContact(
   contact: Contact,
   templateContent: string,
   throttleController: EmailThrottleController,
   dryRun: boolean,
-  result: CampaignResult
+  result: CampaignResult,
+  onProgress?: ProgressCallback,
+  currentContactIndex?: number,
+  totalContacts?: number
 ): Promise<void> {
+  const current = currentContactIndex ?? 0;
+  const total = totalContacts ?? 1;
+
+  // Process template first to get subject for the log
+  const processedTemplate = processTemplate(templateContent, contact);
+  const { subject, body } = extractSubject(processedTemplate);
+  const bodyPreview = body.substring(0, 500);
+
+  // Determine mode based on dryRun flag
+  const mode: SendMode = dryRun ? 'dry_run' : 'production';
+
+  // Create send log entry before any processing
+  const sendLog = await createSendLog(contact.id, mode, subject, bodyPreview);
+  const sendLogId = sendLog.id;
+
   // Verify email FIRST - before any waiting or processing
-  const verificationOutcome = await verifyContactEmail(contact, result);
+  await reportProgress(onProgress, {
+    currentContact: current,
+    totalContacts: total,
+    email: contact.email,
+    status: 'verifying',
+    message: `Verifying ${contact.email}...`,
+  });
+
+  const verificationOutcome = await verifyContactEmail(contact, result, sendLogId);
   if (!verificationOutcome.shouldContinue || !verificationOutcome.verificationResult) {
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'failed',
+      message: `Verification failed for ${contact.email}`,
+    });
     return;
   }
 
   // Skip if email is not safe - no waiting for rejected contacts
   if (!isEmailSafe(verificationOutcome.verificationResult)) {
-    await handleUnsafeEmail(contact, verificationOutcome.verificationResult, result);
+    await handleUnsafeEmail(contact, verificationOutcome.verificationResult, result, sendLogId);
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'skipped',
+      message: `Skipped ${contact.email} - unsafe email`,
+    });
     return;
   }
 
   // Only wait for contacts that will actually be sent
-  await throttleController.waitBeforeSend();
+  await reportProgress(onProgress, {
+    currentContact: current,
+    totalContacts: total,
+    email: contact.email,
+    status: 'waiting',
+    message: 'Waiting before next send...',
+  });
 
-  // Process template for valid contacts only
-  const processedTemplate = processTemplate(templateContent, contact);
-  const { subject, body } = extractSubject(processedTemplate);
+  await throttleController.waitBeforeSend((remainingMs, totalMs) => {
+    // Update progress during wait with countdown
+    reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'waiting',
+      waitTimeRemainingMs: remainingMs,
+      totalWaitTimeMs: totalMs,
+      message: `Waiting ${Math.ceil(remainingMs / 1000)}s before next send...`,
+    }).catch(() => {
+      // Silently ignore progress callback errors
+    });
+  });
 
   if (dryRun) {
-    handleDryRun(contact, result);
+    await handleDryRun(contact, result, sendLogId, subject);
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'completed',
+      message: `Dry run: ${contact.email} (would send)`,
+    });
     return;
   }
 
   // Render markdown to HTML
+  await reportProgress(onProgress, {
+    currentContact: current,
+    totalContacts: total,
+    email: contact.email,
+    status: 'sending',
+    message: `Sending to ${contact.email}...`,
+  });
+
   const htmlBody = await renderMarkdown(body);
   const textBody = generatePlainText(body);
 
@@ -382,22 +561,50 @@ async function processContact(
   const sendResult = await sendEmail(emailParams, throttleController);
 
   if (sendResult.success) {
-    await handleSuccessfulSend(contact, sendResult.messageId || 'unknown', result);
+    await handleSuccessfulSend(
+      contact,
+      sendResult.messageId || 'unknown',
+      result,
+      sendLogId,
+      subject
+    );
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'completed',
+      message: `Sent to ${contact.email}`,
+    });
   } else {
-    await handleFailedSend(contact, sendResult.error || 'Unknown error', result);
+    await handleFailedSend(
+      contact,
+      sendResult.error || 'Unknown error',
+      result,
+      sendLogId,
+      subject
+    );
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'failed',
+      message: `Failed to send to ${contact.email}: ${sendResult.error || 'Unknown error'}`,
+    });
   }
 }
 
 /**
- * Run email campaign for all pending contacts
+ * Run email campaign for all eligible contacts
  *
  * @param templatePath - Path to markdown template file
  * @param dryRun - If true, don't actually send emails (for testing)
+ * @param onProgress - Optional callback for real-time progress updates
  * @returns Campaign result summary
  */
 export async function runCampaign(
   templatePath: string,
-  dryRun: boolean = false
+  dryRun: boolean = false,
+  onProgress?: ProgressCallback
 ): Promise<CampaignResult> {
   const result: CampaignResult = {
     totalContacts: 0,
@@ -417,8 +624,8 @@ export async function runCampaign(
   // Get shared throttle controller singleton
   const throttleController = getEmailThrottleController();
 
-  // Get pending contacts
-  const contacts = await getPendingContacts();
+  // Get eligible contacts (those without a successful send log)
+  const contacts = await getEligibleContacts();
   result.totalContacts = contacts.length;
 
   if (contacts.length === 0) {
@@ -428,7 +635,19 @@ export async function runCampaign(
   // Preliminary quota check before starting campaign
   const canStartCampaign = await throttleController.checkQuota();
   if (!canStartCampaign) {
-    await markAllContactsAsFailed(contacts, result);
+    // Log quota exhaustion error - no need to mark contacts as failed
+    // since we're using send_logs now and they can be retried
+    result.failedCount = contacts.length;
+    for (const contact of contacts) {
+      result.details.push({
+        email: contact.email,
+        status: 'failed',
+        reason: 'SES quota near exhaustion. Campaign aborted.',
+      });
+    }
+    await logger.logError('Campaign Aborted', 'SES quota near exhaustion', {
+      attemptedContacts: contacts.length,
+    });
     return result;
   }
 
@@ -437,11 +656,35 @@ export async function runCampaign(
     const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
 
     // Process each contact
-    for (const contact of contacts) {
+    for (let i = 0; i < contacts.length; i++) {
+      const contact = contacts[i];
       try {
-        await processContact(contact, templateContent, throttleController, dryRun, result);
+        await processContact(
+          contact,
+          templateContent,
+          throttleController,
+          dryRun,
+          result,
+          onProgress,
+          i + 1, // current contact index (1-based for display)
+          contacts.length // total contacts
+        );
       } catch (error) {
-        await handleContactError(contact, error, result);
+        // Create a send log for the error case since processContact might have failed
+        // before creating one (e.g., during template processing)
+        const { subject, body } = extractSubject(processTemplate(templateContent, contact));
+        const bodyPreview = body.substring(0, 500);
+        const mode: SendMode = dryRun ? 'dry_run' : 'production';
+        const errorLog = await createSendLog(contact.id, mode, subject, bodyPreview);
+        await handleContactError(contact, error, result, errorLog.id);
+        // Report the error via progress callback
+        await reportProgress(onProgress, {
+          currentContact: i + 1,
+          totalContacts: contacts.length,
+          email: contact.email,
+          status: 'failed',
+          message: `Error processing ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
+        });
       }
     }
 

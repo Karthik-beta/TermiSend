@@ -9,14 +9,43 @@
 
 /**
  * Represents a contact in the database
+ * Contacts are identity-only - send status is tracked in send_logs table
  */
 export interface Contact {
   id: string;
   companyName: string;
   personName: string;
   email: string;
-  status: 'pending' | 'sent' | 'verified' | 'failed' | 'invalid';
   createdAt: Date;
+}
+
+/**
+ * Send log status values
+ * Tracks the outcome of each send attempt
+ */
+export type LogStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+
+/**
+ * Send mode for campaign execution
+ */
+export type SendMode = 'production' | 'test' | 'dry_run';
+
+/**
+ * Represents a send log entry in the database
+ * Tracks every email send attempt with full context for retry support
+ */
+export interface SendLog {
+  id: string;
+  contactId: string; // FK to contacts
+  campaignId?: string; // Optional - for future campaigns feature
+  status: LogStatus;
+  mode: SendMode;
+  subject: string; // What was sent
+  bodyPreview: string; // First 500 chars of body
+  errorReason?: string; // If failed, why
+  messageId?: string; // SES message ID
+  sentAt?: Date; // When actually sent
+  createdAt: Date; // When log entry created
 }
 
 /**
@@ -44,6 +73,8 @@ export type EventType =
   | 'AWS_SES_REQ'
   | 'AWS_SES_RES'
   | 'CONTACT_UPDATED'
+  | 'SEND_LOG_CREATED'
+  | 'SEND_LOG_UPDATED'
   | 'ERROR';
 
 // ============================================================================
@@ -254,4 +285,50 @@ export interface ThrottleLogEntry {
   totalDelayMs?: number;
   reason?: string;
   timestamp: string;
+}
+
+// ============================================================================
+// Progress Callback Types
+// ============================================================================
+
+/**
+ * @deprecated Use LogStatus for send log status tracking.
+ * This type is kept for progress callback compatibility during the migration.
+ * Status of email sending for a contact in progress callbacks
+ */
+export type SendStatus = 'verifying' | 'waiting' | 'sending' | 'completed' | 'skipped' | 'failed';
+
+/**
+ * Progress information for email sending
+ * Used for real-time UI updates during campaign execution
+ */
+export interface SendProgress {
+  currentContact: number;
+  totalContacts: number;
+  email: string;
+  status: SendStatus;
+  waitTimeRemainingMs?: number; // For countdown display
+  totalWaitTimeMs?: number; // Original wait time
+  message?: string; // Human-readable status message
+}
+
+/**
+ * Callback function for progress updates
+ * Can be synchronous or asynchronous
+ */
+export type ProgressCallback = (progress: SendProgress) => void | Promise<void>;
+
+// ============================================================================
+// Send Stats Types (for UI)
+// ============================================================================
+
+/**
+ * Aggregate send statistics for display in UI
+ */
+export interface SendStats {
+  totalContacts: number;
+  eligibleForSending: number; // Contacts without successful send log
+  pendingSends: number; // Currently pending send logs
+  sentLast24Hours: number;
+  failedLast24Hours: number;
 }
