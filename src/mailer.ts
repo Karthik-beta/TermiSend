@@ -10,9 +10,14 @@ import { logger } from './logger.js';
 import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
 import { EmailThrottleController, getEmailThrottleController } from './throttle.js';
-import type { CampaignResult, Contact, EmailSendParams } from './types.js';
+import type {
+  CampaignResult,
+  Contact,
+  EmailSendParams,
+  EmailVerificationResponse,
+} from './types.js';
 import { getSafeFilename } from './utils/security.js';
-import { verifyEmail } from './verifier.js';
+import { isEmailSafe, verifyEmail } from './verifier.js';
 
 // Test-only exports for dependency injection
 // Use regular properties (not getters) so Bun's spyOn can mock them
@@ -194,6 +199,196 @@ export function generatePlainText(markdown: string): string {
 // ============================================================================
 
 /**
+ * Mark all contacts as failed due to quota exhaustion
+ */
+async function markAllContactsAsFailed(contacts: Contact[], result: CampaignResult): Promise<void> {
+  for (const contact of contacts) {
+    result.failedCount++;
+    result.details.push({
+      email: contact.email,
+      status: 'failed',
+      reason: 'SES quota near exhaustion. Campaign aborted.',
+    });
+    await updateContactStatus(contact.email, 'failed');
+  }
+}
+
+/**
+ * Result of email verification for a contact
+ */
+interface VerificationOutcome {
+  shouldContinue: boolean;
+  verificationResult?: EmailVerificationResponse;
+}
+
+/**
+ * Verify a contact's email and handle verification errors
+ */
+async function verifyContactEmail(
+  contact: Contact,
+  result: CampaignResult
+): Promise<VerificationOutcome> {
+  try {
+    const verificationResult = await verifyEmail(contact.email);
+    return { shouldContinue: true, verificationResult };
+  } catch (verifyError) {
+    const errorMsg = verifyError instanceof Error ? verifyError.message : String(verifyError);
+    result.failedCount++;
+    result.details.push({
+      email: contact.email,
+      status: 'failed',
+      reason: `Email verification failed: ${errorMsg}`,
+    });
+    await updateContactStatus(contact.email, 'failed');
+    await logger.logError('Email Verification', errorMsg, { email: contact.email });
+    return { shouldContinue: false };
+  }
+}
+
+/**
+ * Handle unsafe email - mark as skipped
+ */
+async function handleUnsafeEmail(
+  contact: Contact,
+  verificationResult: EmailVerificationResponse,
+  result: CampaignResult
+): Promise<void> {
+  result.skippedCount++;
+  result.details.push({
+    email: contact.email,
+    status: 'skipped',
+    reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
+  });
+  await updateContactStatus(contact.email, 'invalid');
+  await logger.logContactUpdated(contact.email, 'pending', 'invalid');
+}
+
+/**
+ * Handle dry run for a contact
+ */
+function handleDryRun(contact: Contact, result: CampaignResult): void {
+  result.sentCount++;
+  result.details.push({
+    email: contact.email,
+    status: 'sent',
+    reason: 'DRY RUN - Email not actually sent',
+  });
+}
+
+/**
+ * Handle successful email send
+ */
+async function handleSuccessfulSend(
+  contact: Contact,
+  messageId: string,
+  result: CampaignResult
+): Promise<void> {
+  result.sentCount++;
+  result.details.push({
+    email: contact.email,
+    status: 'sent',
+    reason: `MessageId: ${messageId}`,
+  });
+  await updateContactStatus(contact.email, 'sent');
+  await logger.logContactUpdated(contact.email, 'pending', 'sent');
+}
+
+/**
+ * Handle failed email send
+ */
+async function handleFailedSend(
+  contact: Contact,
+  errorReason: string,
+  result: CampaignResult
+): Promise<void> {
+  result.failedCount++;
+  result.details.push({
+    email: contact.email,
+    status: 'failed',
+    reason: errorReason,
+  });
+  await updateContactStatus(contact.email, 'failed');
+  await logger.logContactUpdated(contact.email, 'pending', 'failed');
+}
+
+/**
+ * Handle contact processing error
+ */
+async function handleContactError(
+  contact: Contact,
+  error: unknown,
+  result: CampaignResult
+): Promise<void> {
+  const errorMsg = error instanceof Error ? error.message : String(error);
+  result.failedCount++;
+  result.details.push({
+    email: contact.email,
+    status: 'failed',
+    reason: errorMsg,
+  });
+  await logger.logError('Campaign Processing', errorMsg, {
+    email: contact.email,
+    contact: { companyName: contact.companyName, personName: contact.personName },
+  });
+  await updateContactStatus(contact.email, 'failed');
+}
+
+/**
+ * Process a single contact - send email after verification
+ */
+async function processContact(
+  contact: Contact,
+  templateContent: string,
+  throttleController: EmailThrottleController,
+  dryRun: boolean,
+  result: CampaignResult
+): Promise<void> {
+  // Verify email FIRST - before any waiting or processing
+  const verificationOutcome = await verifyContactEmail(contact, result);
+  if (!verificationOutcome.shouldContinue || !verificationOutcome.verificationResult) {
+    return;
+  }
+
+  // Skip if email is not safe - no waiting for rejected contacts
+  if (!isEmailSafe(verificationOutcome.verificationResult)) {
+    await handleUnsafeEmail(contact, verificationOutcome.verificationResult, result);
+    return;
+  }
+
+  // Only wait for contacts that will actually be sent
+  await throttleController.waitBeforeSend();
+
+  // Process template for valid contacts only
+  const processedTemplate = processTemplate(templateContent, contact);
+  const { subject, body } = extractSubject(processedTemplate);
+
+  if (dryRun) {
+    handleDryRun(contact, result);
+    return;
+  }
+
+  // Render markdown to HTML
+  const htmlBody = await renderMarkdown(body);
+  const textBody = generatePlainText(body);
+
+  // Send email
+  const emailParams: EmailSendParams = {
+    to: contact.email,
+    subject,
+    htmlBody,
+    textBody,
+  };
+
+  const sendResult = await sendEmail(emailParams, throttleController);
+
+  if (sendResult.success) {
+    await handleSuccessfulSend(contact, sendResult.messageId || 'unknown', result);
+  } else {
+    await handleFailedSend(contact, sendResult.error || 'Unknown error', result);
+  }
+}
+
+/**
  * Run email campaign for all pending contacts
  *
  * @param templatePath - Path to markdown template file
@@ -233,16 +428,7 @@ export async function runCampaign(
   // Preliminary quota check before starting campaign
   const canStartCampaign = await throttleController.checkQuota();
   if (!canStartCampaign) {
-    // Mark all contacts as failed
-    for (const contact of contacts) {
-      result.failedCount++;
-      result.details.push({
-        email: contact.email,
-        status: 'failed',
-        reason: 'SES quota near exhaustion. Campaign aborted.',
-      });
-      await updateContactStatus(contact.email, 'failed');
-    }
+    await markAllContactsAsFailed(contacts, result);
     return result;
   }
 
@@ -252,90 +438,10 @@ export async function runCampaign(
 
     // Process each contact
     for (const contact of contacts) {
-      // Wait before processing next email (throttling)
-      // This enforces the configured delay between personalizations
-      await throttleController.waitBeforeSend();
-
       try {
-        // Process template
-        const processedTemplate = processTemplate(templateContent, contact);
-
-        // Extract subject and body
-        const { subject, body } = extractSubject(processedTemplate);
-
-        // Verify email
-        const verificationResult = await verifyEmail(contact.email);
-
-        // Skip if email is high risk
-        if (verificationResult.risk === 'high' || verificationResult.status === 'invalid') {
-          result.skippedCount++;
-          result.details.push({
-            email: contact.email,
-            status: 'skipped',
-            reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
-          });
-          await updateContactStatus(contact.email, 'invalid');
-          await logger.logContactUpdated(contact.email, 'pending', 'invalid');
-          continue;
-        }
-
-        if (dryRun) {
-          // Dry run - just log what would happen
-          result.sentCount++;
-          result.details.push({
-            email: contact.email,
-            status: 'sent',
-            reason: 'DRY RUN - Email not actually sent',
-          });
-          continue;
-        }
-
-        // Render markdown to HTML
-        const htmlBody = await renderMarkdown(body);
-        const textBody = generatePlainText(body);
-
-        // Send email
-        const emailParams: EmailSendParams = {
-          to: contact.email,
-          subject,
-          htmlBody,
-          textBody,
-        };
-
-        const sendResult = await sendEmail(emailParams, throttleController);
-
-        if (sendResult.success) {
-          result.sentCount++;
-          result.details.push({
-            email: contact.email,
-            status: 'sent',
-            reason: `MessageId: ${sendResult.messageId}`,
-          });
-          await updateContactStatus(contact.email, 'sent');
-          await logger.logContactUpdated(contact.email, 'pending', 'sent');
-        } else {
-          result.failedCount++;
-          result.details.push({
-            email: contact.email,
-            status: 'failed',
-            reason: sendResult.error || 'Unknown error',
-          });
-          await updateContactStatus(contact.email, 'failed');
-          await logger.logContactUpdated(contact.email, 'pending', 'failed');
-        }
+        await processContact(contact, templateContent, throttleController, dryRun, result);
       } catch (error) {
-        result.failedCount++;
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        result.details.push({
-          email: contact.email,
-          status: 'failed',
-          reason: errorMsg,
-        });
-        await logger.logError('Campaign Processing', errorMsg, {
-          email: contact.email,
-          contact: { companyName: contact.companyName, personName: contact.personName },
-        });
-        await updateContactStatus(contact.email, 'failed');
+        await handleContactError(contact, error, result);
       }
     }
 
