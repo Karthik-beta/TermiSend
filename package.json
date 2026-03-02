@@ -10,7 +10,9 @@
     "prod": "NODE_ENV=production bun run src/index.tsx",
     "build": "bun build ./src/index.tsx --outdir ./dist --target=bun",
     "db:init": "bun run src/db.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write ."
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.1000.0",
