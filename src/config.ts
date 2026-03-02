@@ -119,3 +119,52 @@ export function getQuotaBufferPercent(): number {
   const env = getEnv();
   return Number.parseInt(env.SES_QUOTA_BUFFER_PERCENT || '10', 10);
 }
+
+// ============================================================================
+// Development / Safety Controls
+// ============================================================================
+
+import { isProduction } from './utils/security.js';
+
+/**
+ * Get the internal test email for dev/staging redirection
+ * @returns Test recipient email address
+ * @throws Error if not in production and TEST_RECIPIENT_EMAIL is missing
+ */
+export function getTestRecipientEmail(): string {
+  const env = getEnv();
+  const testEmail = env.TEST_RECIPIENT_EMAIL || process.env.TEST_RECIPIENT_EMAIL;
+
+  if (!isProduction() && !testEmail) {
+    throw new Error('TEST_RECIPIENT_EMAIL must be configured when not in production');
+  }
+
+  return testEmail || '';
+}
+
+/**
+ * Check if email verification should be simulated
+ * Defaults to true in non-production environments
+ */
+export function shouldSimulateVerifier(): boolean {
+  const env = getEnv();
+  const simulate = env.SIMULATE_VERIFIER || process.env.SIMULATE_VERIFIER;
+
+  if (isProduction()) {
+    return false;
+  }
+
+  return simulate !== 'false';
+}
+
+/**
+ * Check if outgoing emails should be redirected to test email
+ * ALWAYS returns true in non-production environments to prevent accidental sending.
+ */
+export function shouldRedirectEmails(): boolean {
+  if (isProduction()) {
+    return false;
+  }
+
+  return true;
+}

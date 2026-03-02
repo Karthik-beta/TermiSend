@@ -9,6 +9,7 @@ import {
   SendEmailCommand,
   type SendEmailCommandInput,
 } from '@aws-sdk/client-ses';
+import { getTestRecipientEmail, shouldRedirectEmails } from './config.js';
 import { logger } from './logger.js';
 import { getSesClient, verifySesConfiguration } from './ses-quota.js';
 import type { EmailThrottleController } from './throttle.js';
@@ -202,7 +203,30 @@ export function sendEmail(
     return Promise.resolve({ success: false, error: 'Missing parameters' });
   }
 
-  const sendEmailInput = constructSendEmailInput(params, sesFromEmail);
+  // Handle environment-based redirection
+  let finalTo = params.to;
+  let finalSubject = params.subject;
+
+  if (shouldRedirectEmails()) {
+    try {
+      finalTo = getTestRecipientEmail();
+      finalSubject = `[DEV: ${params.to}] ${params.subject}`;
+    } catch (error) {
+      return Promise.resolve({
+        success: false,
+        error: error instanceof Error ? error.message : 'Redirection error',
+      });
+    }
+  }
+
+  const sendEmailInput = constructSendEmailInput(
+    {
+      ...params,
+      to: finalTo,
+      subject: finalSubject,
+    },
+    sesFromEmail
+  );
   return sendWithRetry(sesClient, sendEmailInput, params, controller);
 }
 

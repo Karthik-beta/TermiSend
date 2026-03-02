@@ -3,9 +3,10 @@
  * Handles MyEmailVerifier API integration for email validation
  */
 
-import { getEnv } from './config.js';
+import { getEnv, shouldSimulateVerifier } from './config.js';
 import { updateEmailVerifierCredits } from './db.js';
 import { logger } from './logger.js';
+import { delay } from './throttle.js';
 import type { EmailVerificationResponse } from './types.js';
 import {
   RateLimiter,
@@ -93,6 +94,37 @@ export class EmailValidationError extends Error {
 }
 
 // ============================================================================
+// Simulation (Development Mode)
+// ============================================================================
+
+/**
+ * Simulate MyEmailVerifier API response for development
+ */
+async function simulateVerifyEmail(email: string): Promise<EmailVerificationResponse> {
+  const lowEmail = email.toLowerCase();
+  await delay(100); // Simulate network delay
+
+  if (lowEmail.includes('invalid')) {
+    return { status: 'invalid', risk: 'high', message: 'Simulated: Address does not exist' };
+  }
+  if (lowEmail.includes('catchall')) {
+    return { status: 'catch-all', risk: 'medium', message: 'Simulated: Catch-all domain' };
+  }
+  if (lowEmail.includes('unknown')) {
+    return { status: 'unknown', risk: 'medium', message: 'Simulated: Unable to verify' };
+  }
+  if (lowEmail.includes('role')) {
+    return { status: 'role', risk: 'low', message: 'Simulated: Role-based address' };
+  }
+  if (lowEmail.includes('disposable')) {
+    return { status: 'disposable', risk: 'high', message: 'Simulated: Disposable address' };
+  }
+
+  // Default to valid for other addresses
+  return { status: 'valid', risk: 'low', message: 'Simulated: Valid email address' };
+}
+
+// ============================================================================
 // API Client
 // ============================================================================
 
@@ -116,6 +148,14 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
   const rateLimitCheck = verificationRateLimiter.checkLimit(email.toLowerCase());
   if (!rateLimitCheck.allowed) {
     throw new RateLimitError(rateLimitCheck.retryAfterMs || 5000);
+  }
+
+  // Handle simulation in development
+  if (shouldSimulateVerifier()) {
+    await logger.info(`SIMULATION: Verifying email ${redactEmail(email)}`);
+    const simulatedResponse = await simulateVerifyEmail(email);
+    await logger.logApiVerifierResponse(email, simulatedResponse);
+    return simulatedResponse;
   }
 
   const apiKey = getApiKey();
@@ -184,6 +224,11 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
  * @returns Number of credits remaining, or null if fetch fails
  */
 export async function fetchVerifierCredits(): Promise<number | null> {
+  // Handle simulation in development
+  if (shouldSimulateVerifier()) {
+    return 10000; // Return fixed mock value for simulation
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     await logger.warn('MYEMAILVERIFIER_API_KEY not configured, cannot fetch credits');
