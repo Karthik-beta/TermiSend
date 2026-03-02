@@ -515,7 +515,7 @@ async function runStandalone(): Promise<void> {
   // Handle reset command
   if (args[0] === 'reset') {
     try {
-      const _result = await resetDatabase();
+      await resetDatabase();
       await closeConnection();
       process.exit(0);
     } catch (error) {
