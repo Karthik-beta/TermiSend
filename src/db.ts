@@ -212,6 +212,24 @@ export async function insertContact(
 }
 
 /**
+ * Insert a new contact into the database, skipping if email already exists
+ * @returns true if inserted, false if skipped due to duplicate
+ */
+export async function insertContactSkipDuplicate(
+  companyName: string,
+  personName: string,
+  email: string
+): Promise<boolean> {
+  const result = await sql<Contact[]>`
+    INSERT INTO contacts (company_name, person_name, email, status)
+    VALUES (${companyName}, ${personName}, ${email}, 'pending')
+    ON CONFLICT (email) DO NOTHING
+    RETURNING *
+  `;
+  return result.length > 0;
+}
+
+/**
  * Get all contacts with optional status filter
  */
 export async function getContacts(status?: string): Promise<Contact[]> {
@@ -497,7 +515,7 @@ async function runStandalone(): Promise<void> {
   // Handle reset command
   if (args[0] === 'reset') {
     try {
-      await resetDatabase();
+      const _result = await resetDatabase();
       await closeConnection();
       process.exit(0);
     } catch (error) {
@@ -524,7 +542,24 @@ async function runStandalone(): Promise<void> {
   }
 }
 
-// Check if this file is being run directly
-if (import.meta.url === `file://${process.cwd()}/src/db.ts`) {
+import { pathToFileURL } from 'node:url';
+
+// Check if this file is being run directly (not imported as a module)
+// Only run standalone logic when db.ts is the entry point
+const isDbEntryPoint = (): boolean => {
+  // Get the actual entry point from Bun's runtime
+  const entryPoint = process.argv[1];
+  if (!entryPoint) {
+    return false;
+  }
+
+  // Normalize both paths for comparison (case-insensitive for Windows)
+  const entryUrl = pathToFileURL(entryPoint).href.toLowerCase();
+  const dbUrl = pathToFileURL(`${process.cwd()}/src/db.ts`).href.toLowerCase();
+
+  return entryUrl === dbUrl;
+};
+
+if (isDbEntryPoint()) {
   runStandalone();
 }

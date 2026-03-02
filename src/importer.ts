@@ -4,8 +4,8 @@
  */
 
 import ExcelJs from 'exceljs';
-import { type ZodIssue, z } from 'zod';
-import { sql } from './db.js';
+import { z } from 'zod';
+import { insertContactSkipDuplicate } from './db.js';
 import { logger } from './logger.js';
 import { validateImportPath } from './path-validator.js';
 import type { ContactInput, ImportResult } from './types.js';
@@ -61,7 +61,7 @@ function normalizeRow(row: ExcelRow): ContactInput {
   return {
     companyName: cellToString(row['Company Name']),
     personName: cellToString(row['Person Name']),
-    email: cellToString(row.Email).toLowerCase(),
+    email: cellToString(row.Email).toLowerCase().trim(),
   };
 }
 
@@ -75,9 +75,7 @@ function validateRow(
   const result = ContactSchema.safeParse(rowData);
 
   if (!result.success) {
-    const errors = result.error.issues
-      .map((e: ZodIssue) => `${e.path.join('.')}: ${e.message}`)
-      .join(', ');
+    const errors = result.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
     return { success: false, error: errors };
   }
 
@@ -95,7 +93,8 @@ async function processRow(
   row: ExcelJs.Row,
   rowNumber: number,
   headerStrings: string[],
-  result: ImportResult
+  result: ImportResult,
+  seenEmails: Set<string>
 ): Promise<void> {
   // Skip empty rows
   if (row.values === null || row.values === undefined) {
@@ -128,18 +127,29 @@ async function processRow(
     return;
   }
 
-  try {
-    // Insert contact
-    await sql`
-      INSERT INTO contacts (company_name, person_name, email, status)
-      VALUES (${validation.data.companyName}, ${validation.data.personName}, ${validation.data.email}, 'pending')
-      ON CONFLICT (email) DO UPDATE SET
-        company_name = EXCLUDED.company_name,
-        person_name = EXCLUDED.person_name,
-        status = 'pending'
-    `;
+  // Check for file-internal duplicates
+  const email = validation.data.email;
+  if (seenEmails.has(email)) {
+    result.skippedCount++;
+    await logger.logExcelImportRowInvalid(rowNumber, 'Duplicate email in file', normalizedData);
+    return;
+  }
+  seenEmails.add(email);
 
-    result.successCount++;
+  try {
+    // Insert contact, skip if already exists in DB
+    const inserted = await insertContactSkipDuplicate(
+      validation.data.companyName,
+      validation.data.personName,
+      validation.data.email
+    );
+
+    if (inserted) {
+      result.insertedCount++;
+      result.successCount++; // Keep for backward compatibility
+    } else {
+      result.existingCount++;
+    }
     await logger.logExcelImportRowValid(rowNumber, { rowNumber });
   } catch (error) {
     result.failedCount++;
@@ -166,8 +176,14 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     totalRows: 0,
     successCount: 0,
     failedCount: 0,
+    insertedCount: 0,
+    skippedCount: 0,
+    existingCount: 0,
     errors: [],
   };
+
+  // Track emails seen in this file to detect file-internal duplicates
+  const seenEmails = new Set<string>();
 
   // Validate file path for security
   const pathValidation = validateImportPath(filePath);
@@ -199,7 +215,8 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     // Validate headers
     const headerRow = worksheet.getRow(1);
     const headers = headerRow.values as (string | number)[];
-    const headerStrings = headers.map((h) => cellToString(h));
+    // Filter out empty strings that result from ExcelJS's 1-based indexing (index 0 is always undefined)
+    const headerStrings = headers.map((h) => cellToString(h)).filter((h) => h.length > 0);
 
     const missingColumns = REQUIRED_COLUMNS.filter((col) => !headerStrings.includes(col));
 
@@ -216,7 +233,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
 
     // Process each row
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
-      await processRow(worksheet.getRow(rowNumber), rowNumber, headerStrings, result);
+      await processRow(worksheet.getRow(rowNumber), rowNumber, headerStrings, result, seenEmails);
     }
 
     // Log import completion
@@ -224,7 +241,15 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
       totalRows: result.totalRows,
       successCount: result.successCount,
       failedCount: result.failedCount,
+      insertedCount: result.insertedCount,
+      skippedCount: result.skippedCount,
+      existingCount: result.existingCount,
     });
+
+    // Simple console summary
+    logger.info(
+      `Import complete: ${result.insertedCount} inserted, ${result.skippedCount} skipped (duplicates in file), ${result.existingCount} existing (already in DB)`
+    );
 
     return result;
   } catch (error) {
