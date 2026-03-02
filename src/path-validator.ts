@@ -157,8 +157,11 @@ function resolveAndSanitize(input: string): string | null {
  * @returns ValidationResult with sanitized path or error
  */
 export function validateImportPath(inputPath: string): PathValidationResult {
+  // Trim whitespace and remove surrounding quotes from input to handle accidental trailing spaces or copied paths
+  const trimmedPath = inputPath.trim().replace(/^"+|"+$/g, '');
+
   // Check for traversal
-  if (containsTraversal(inputPath)) {
+  if (containsTraversal(trimmedPath)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -167,7 +170,7 @@ export function validateImportPath(inputPath: string): PathValidationResult {
   }
 
   // Check extension
-  if (!hasAllowedExtension(inputPath, ALLOWED_IMPORT_EXTENSIONS)) {
+  if (!hasAllowedExtension(trimmedPath, ALLOWED_IMPORT_EXTENSIONS)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -176,7 +179,7 @@ export function validateImportPath(inputPath: string): PathValidationResult {
   }
 
   // Resolve and validate path
-  const sanitized = resolveAndSanitize(inputPath);
+  const sanitized = resolveAndSanitize(trimmedPath);
   if (sanitized === null) {
     return {
       valid: false,
@@ -197,8 +200,11 @@ export function validateImportPath(inputPath: string): PathValidationResult {
  * @returns ValidationResult with sanitized path or error
  */
 export function validateTemplatePath(inputPath: string): PathValidationResult {
+  // Trim whitespace and remove surrounding quotes from input
+  const trimmedPath = inputPath.trim().replace(/^"+|"+$/g, '');
+
   // Check for traversal
-  if (containsTraversal(inputPath)) {
+  if (containsTraversal(trimmedPath)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -207,7 +213,7 @@ export function validateTemplatePath(inputPath: string): PathValidationResult {
   }
 
   // Check extension
-  if (!hasAllowedExtension(inputPath, ALLOWED_TEMPLATE_EXTENSIONS)) {
+  if (!hasAllowedExtension(trimmedPath, ALLOWED_TEMPLATE_EXTENSIONS)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -216,7 +222,7 @@ export function validateTemplatePath(inputPath: string): PathValidationResult {
   }
 
   // Resolve and validate path
-  const sanitized = resolveAndSanitize(inputPath);
+  const sanitized = resolveAndSanitize(trimmedPath);
   if (sanitized === null) {
     return {
       valid: false,
@@ -241,8 +247,11 @@ export function validateFilePath(
   inputPath: string,
   allowedExtensions: string[]
 ): PathValidationResult {
+  // Trim whitespace and remove surrounding quotes from input
+  const trimmedPath = inputPath.trim().replace(/^"+|"+$/g, '');
+
   // Check for traversal
-  if (containsTraversal(inputPath)) {
+  if (containsTraversal(trimmedPath)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -251,7 +260,7 @@ export function validateFilePath(
   }
 
   // Check extension
-  if (!hasAllowedExtension(inputPath, allowedExtensions)) {
+  if (!hasAllowedExtension(trimmedPath, allowedExtensions)) {
     return {
       valid: false,
       sanitizedPath: '',
@@ -260,7 +269,7 @@ export function validateFilePath(
   }
 
   // Resolve and validate path
-  const sanitized = resolveAndSanitize(inputPath);
+  const sanitized = resolveAndSanitize(trimmedPath);
   if (sanitized === null) {
     return {
       valid: false,
