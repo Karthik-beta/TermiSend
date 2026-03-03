@@ -1,0 +1,442 @@
+/**
+ * Domain Event Types for TermiSend
+ * Type definitions for the internal event system
+ *
+ * This module defines all domain events that represent real business occurrences
+ * in the TermiSend application, enabling loose coupling between components
+ * and providing hooks for analytics and monitoring.
+ */
+
+// ============================================================================
+// Domain Event Type Enum
+// ============================================================================
+
+/**
+ * Enumeration of all domain event types in TermiSend
+ * Each type represents a distinct business occurrence
+ */
+export enum DomainEventType {
+  // Contact lifecycle events
+  CONTACT_IMPORTED = 'CONTACT_IMPORTED',
+  CONTACT_DUPLICATE_SKIPPED = 'CONTACT_DUPLICATE_SKIPPED',
+  CONTACT_VERIFIED = 'CONTACT_VERIFIED',
+  CONTACT_INVALID = 'CONTACT_INVALID',
+  CONTACT_DEEMED_UNSAFE = 'CONTACT_DEEMED_UNSAFE',
+
+  // Email sending events
+  EMAIL_SEND_REQUESTED = 'EMAIL_SEND_REQUESTED',
+  EMAIL_SENT = 'EMAIL_SENT',
+  EMAIL_FAILED = 'EMAIL_FAILED',
+  EMAIL_SKIPPED = 'EMAIL_SKIPPED',
+
+  // API events
+  SES_API_CALLED = 'SES_API_CALLED',
+  VERIFIER_API_CALLED = 'VERIFIER_API_CALLED',
+
+  // Quota and throttling events
+  QUOTA_SNAPSHOT_RECORDED = 'QUOTA_SNAPSHOT_RECORDED',
+  QUOTA_CHECK_PASSED = 'QUOTA_CHECK_PASSED',
+  QUOTA_CHECK_FAILED = 'QUOTA_CHECK_FAILED',
+  THROTTLE_DELAY_STARTED = 'THROTTLE_DELAY_STARTED',
+  THROTTLE_DELAY_COMPLETED = 'THROTTLE_DELAY_COMPLETED',
+
+  // Campaign events
+  CAMPAIGN_STARTED = 'CAMPAIGN_STARTED',
+  CAMPAIGN_COMPLETED = 'CAMPAIGN_COMPLETED',
+  CAMPAIGN_PAUSED = 'CAMPAIGN_PAUSED',
+}
+
+// ============================================================================
+// Contact Lifecycle Event Payloads
+// ============================================================================
+
+/**
+ * Payload for CONTACT_IMPORTED event
+ * Emitted when a new contact is successfully imported from a file
+ */
+export interface ContactImportedPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Email address */
+  email: string;
+  /** Company name */
+  companyName: string;
+  /** Person name */
+  personName: string;
+  /** Source file path */
+  sourceFile: string;
+  /** Row number in source file */
+  rowNumber: number;
+}
+
+/**
+ * Payload for CONTACT_DUPLICATE_SKIPPED event
+ * Emitted when a duplicate email is detected during import
+ */
+export interface ContactDuplicateSkippedPayload {
+  /** Email that was duplicate */
+  email: string;
+  /** Source file path */
+  sourceFile: string;
+  /** Row number in source file */
+  rowNumber: number;
+  /** Reason for duplicate (database/file) */
+  duplicateSource: 'database' | 'file';
+}
+
+/**
+ * Payload for CONTACT_VERIFIED event
+ * Emitted after email verification completes
+ */
+export interface ContactVerifiedPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Email address */
+  email: string;
+  /** Verification result */
+  result: 'valid' | 'invalid' | 'unknown';
+  /** Verification response details */
+  details?: {
+    isDisposable?: boolean;
+    isFree?: boolean;
+    domain?: string;
+    mxRecord?: boolean;
+  };
+  /** API response time in milliseconds */
+  responseTimeMs?: number;
+}
+
+/**
+ * Payload for CONTACT_INVALID event
+ * Emitted when an email fails format validation
+ */
+export interface ContactInvalidPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Email address */
+  email: string;
+  /** Reason for invalid status */
+  reason: string;
+  /** Validation error details */
+  error?: string;
+}
+
+/**
+ * Payload for CONTACT_DEEMED_UNSAFE event
+ * Emitted when an email is flagged as unsafe by verification
+ */
+export interface ContactDeemedUnsafePayload {
+  /** Contact ID */
+  contactId: string;
+  /** Email address */
+  email: string;
+  /** Reason for unsafe status */
+  reason: string;
+  /** Safety check details */
+  details?: {
+    isDisposable?: boolean;
+    isFree?: boolean;
+    otherFlags?: string[];
+  };
+}
+
+// ============================================================================
+// Email Sending Event Payloads
+// ============================================================================
+
+/**
+ * Payload for EMAIL_SEND_REQUESTED event
+ * Emitted when an email send is initiated
+ */
+export interface EmailSendRequestedPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Send log ID */
+  sendLogId: string;
+  /** Campaign ID (if applicable) */
+  campaignId?: string;
+  /** Email subject */
+  subject: string;
+  /** Send mode */
+  mode: 'production' | 'test' | 'dry_run';
+}
+
+/**
+ * Payload for EMAIL_SENT event
+ * Emitted after successful email delivery via SES
+ */
+export interface EmailSentPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Send log ID */
+  sendLogId: string;
+  /** Campaign ID (if applicable) */
+  campaignId?: string;
+  /** SES message ID */
+  messageId: string;
+  /** Email subject */
+  subject: string;
+  /** Send mode */
+  mode: 'production' | 'test' | 'dry_run';
+  /** Time taken to send in milliseconds */
+  sendTimeMs?: number;
+}
+
+/**
+ * Payload for EMAIL_FAILED event
+ * Emitted when an email send attempt fails
+ */
+export interface EmailFailedPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Send log ID */
+  sendLogId: string;
+  /** Campaign ID (if applicable) */
+  campaignId?: string;
+  /** Error reason */
+  errorReason: string;
+  /** Error category */
+  errorCategory: 'ses_error' | 'verification_error' | 'throttle_error' | 'other';
+  /** Retry attempt number */
+  retryAttempt?: number;
+}
+
+/**
+ * Payload for EMAIL_SKIPPED event
+ * Emitted when an email is skipped from sending
+ */
+export interface EmailSkippedPayload {
+  /** Contact ID */
+  contactId: string;
+  /** Send log ID */
+  sendLogId: string;
+  /** Campaign ID (if applicable) */
+  campaignId?: string;
+  /** Reason for skipping */
+  reason: string;
+  /** Skip category */
+  skipCategory: 'unsafe_email' | 'dry_run' | 'other';
+}
+
+// ============================================================================
+// API Event Payloads
+// ============================================================================
+
+/**
+ * Payload for SES_API_CALLED event
+ * Emitted for each SES API call
+ */
+export interface SesApiCalledPayload {
+  /** API endpoint name */
+  apiEndpoint: 'SendEmail' | 'GetSendQuota' | 'GetSendStatistics' | 'ListIdentities';
+  /** Request duration in milliseconds */
+  durationMs: number;
+  /** Success status */
+  success: boolean;
+  /** Error details if failed */
+  error?: string;
+  /** Request ID from AWS */
+  requestId?: string;
+}
+
+/**
+ * Payload for VERIFIER_API_CALLED event
+ * Emitted for each email verifier API call
+ */
+export interface VerifierApiCalledPayload {
+  /** Email being verified */
+  email: string;
+  /** Request duration in milliseconds */
+  durationMs: number;
+  /** Success status */
+  success: boolean;
+  /** Error details if failed */
+  error?: string;
+  /** Credits remaining after call */
+  creditsRemaining?: number;
+}
+
+// ============================================================================
+// Quota and Throttling Event Payloads
+// ============================================================================
+
+/**
+ * Payload for QUOTA_SNAPSHOT_RECORDED event
+ * Emitted when SES quota data is captured
+ */
+export interface QuotaSnapshotRecordedPayload {
+  /** Maximum 24-hour send quota */
+  max24HourSend: number;
+  /** Emails sent in last 24 hours */
+  sentLast24Hours: number;
+  /** Maximum send rate per second */
+  maxSendRate: number;
+  /** Source of quota data */
+  source: 'api' | 'cached';
+  /** Available quota percentage */
+  availablePercentage: number;
+}
+
+/**
+ * Payload for QUOTA_CHECK_PASSED event
+ * Emitted when quota check allows sending
+ */
+export interface QuotaCheckPassedPayload {
+  /** Available quota */
+  availableQuota: number;
+  /** Required quota for send */
+  requiredQuota: number;
+  /** Buffer percentage used */
+  bufferPercentage: number;
+}
+
+/**
+ * Payload for QUOTA_CHECK_FAILED event
+ * Emitted when quota check blocks sending
+ */
+export interface QuotaCheckFailedPayload {
+  /** Available quota */
+  availableQuota: number;
+  /** Required quota for send */
+  requiredQuota: number;
+  /** Reason for failure */
+  reason: 'insufficient_quota' | 'rate_limit_exceeded';
+}
+
+/**
+ * Payload for THROTTLE_DELAY_STARTED event
+ * Emitted when a throttling delay begins
+ */
+export interface ThrottleDelayStartedPayload {
+  /** Delay duration in milliseconds */
+  delayMs: number;
+  /** Reason for delay */
+  reason: 'rate_limit' | 'random_break';
+  /** Contact ID being processed */
+  contactId: string;
+}
+
+/**
+ * Payload for THROTTLE_DELAY_COMPLETED event
+ * Emitted when a throttling delay ends
+ */
+export interface ThrottleDelayCompletedPayload {
+  /** Actual delay duration in milliseconds */
+  actualDelayMs: number;
+  /** Planned delay duration in milliseconds */
+  plannedDelayMs: number;
+  /** Contact ID that was processed */
+  contactId: string;
+}
+
+// ============================================================================
+// Campaign Event Payloads
+// ============================================================================
+
+/**
+ * Payload for CAMPAIGN_STARTED event
+ * Emitted when a campaign begins execution
+ */
+export interface CampaignStartedPayload {
+  /** Campaign ID */
+  campaignId?: string;
+  /** Total contacts to process */
+  totalContacts: number;
+  /** Send mode */
+  mode: 'production' | 'test' | 'dry_run';
+  /** Template file path */
+  templatePath: string;
+}
+
+/**
+ * Payload for CAMPAIGN_COMPLETED event
+ * Emitted when a campaign finishes execution
+ */
+export interface CampaignCompletedPayload {
+  /** Campaign ID */
+  campaignId?: string;
+  /** Total contacts processed */
+  totalContacts: number;
+  /** Successfully sent */
+  sentCount: number;
+  /** Failed sends */
+  failedCount: number;
+  /** Skipped sends */
+  skippedCount: number;
+  /** Campaign duration in milliseconds */
+  durationMs: number;
+}
+
+/**
+ * Payload for CAMPAIGN_PAUSED event
+ * Emitted when a campaign is paused
+ */
+export interface CampaignPausedPayload {
+  /** Campaign ID */
+  campaignId?: string;
+  /** Reason for pause */
+  reason: 'quota_exhausted' | 'manual' | 'error';
+  /** Contacts processed so far */
+  processedContacts: number;
+  /** Remaining contacts */
+  remainingContacts: number;
+}
+
+// ============================================================================
+// Union Types
+// ============================================================================
+
+/**
+ * Union type for all domain event payloads
+ * Each event type has its own specific payload interface
+ */
+export type DomainEventPayload =
+  | ContactImportedPayload
+  | ContactDuplicateSkippedPayload
+  | ContactVerifiedPayload
+  | ContactInvalidPayload
+  | ContactDeemedUnsafePayload
+  | EmailSendRequestedPayload
+  | EmailSentPayload
+  | EmailFailedPayload
+  | EmailSkippedPayload
+  | SesApiCalledPayload
+  | VerifierApiCalledPayload
+  | QuotaSnapshotRecordedPayload
+  | QuotaCheckPassedPayload
+  | QuotaCheckFailedPayload
+  | ThrottleDelayStartedPayload
+  | ThrottleDelayCompletedPayload
+  | CampaignStartedPayload
+  | CampaignCompletedPayload
+  | CampaignPausedPayload;
+
+// ============================================================================
+// Domain Event Interface
+// ============================================================================
+
+/**
+ * Base interface for all domain events
+ * Ensures consistent structure across all event types
+ */
+export interface DomainEvent<T extends DomainEventPayload = DomainEventPayload> {
+  /** Type of event */
+  type: DomainEventType;
+  /** Unique identifier for this specific event occurrence */
+  eventId: string;
+  /** Timestamp when event occurred */
+  timestamp: Date;
+  /** Optional correlation ID for event chains */
+  correlationId?: string;
+  /** Event-specific payload */
+  payload: T;
+}
+
+// ============================================================================
+// Event Handler Types
+// ============================================================================
+
+/**
+ * Handler function type for domain events
+ */
+export type DomainEventHandler = (event: DomainEvent) => void;
