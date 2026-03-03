@@ -5,6 +5,8 @@
 
 import { beforeEach, describe, expect, it } from 'bun:test';
 import {
+  getAnalyticsConfig,
+  getAnalyticsRateLimitMs,
   getEnv,
   getQuotaBufferPercent,
   getSesRateLimit,
@@ -404,6 +406,204 @@ describe('Configuration Module', () => {
 
       // Assert
       expect(result).toBe(-5);
+    });
+  });
+
+  // ============================================================================
+  // getAnalyticsConfig() Tests
+  // ============================================================================
+
+  describe('getAnalyticsConfig()', () => {
+    it('should return default analytics configuration', () => {
+      // Arrange
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(result.enabled).toBe(true);
+      expect(result.syncIntervalMinutes).toBe(60);
+      expect(result.retentionDays).toBe(90);
+    });
+
+    it('should parse custom analytics configuration from environment variables', () => {
+      // Arrange
+      setMockEnv({
+        ANALYTICS_ENABLED: 'false',
+        ANALYTICS_SYNC_INTERVAL_MINUTES: '30',
+        ANALYTICS_RETENTION_DAYS: '180',
+      });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(result.enabled).toBe(false);
+      expect(result.syncIntervalMinutes).toBe(30);
+      expect(result.retentionDays).toBe(180);
+    });
+
+    it('should handle ANALYTICS_ENABLED=false string', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_ENABLED: 'false' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(result.enabled).toBe(false);
+    });
+
+    it('should handle ANALYTICS_ENABLED=TRUE string as true', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_ENABLED: 'TRUE' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert - any value other than 'false' is treated as true
+      expect(result.enabled).toBe(true);
+    });
+
+    it('should handle invalid sync interval value', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_SYNC_INTERVAL_MINUTES: 'invalid' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(Number.isNaN(result.syncIntervalMinutes)).toBe(true);
+    });
+
+    it('should handle invalid retention days value', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RETENTION_DAYS: 'invalid' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(Number.isNaN(result.retentionDays)).toBe(true);
+    });
+
+    it('should handle zero retention days', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RETENTION_DAYS: '0' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(result.retentionDays).toBe(0);
+    });
+
+    it('should handle very large retention days', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RETENTION_DAYS: '3650' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsConfig();
+
+      // Assert
+      expect(result.retentionDays).toBe(3650);
+    });
+  });
+
+  // ============================================================================
+  // getAnalyticsRateLimitMs() Tests
+  // ============================================================================
+
+  describe('getAnalyticsRateLimitMs()', () => {
+    it('should return default rate limit of 1000ms', () => {
+      // Arrange
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert
+      expect(result).toBe(1000);
+    });
+
+    it('should return custom rate limit from environment variable', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: '2000' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert
+      expect(result).toBe(2000);
+    });
+
+    it('should handle zero rate limit', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: '0' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert
+      expect(result).toBe(0);
+    });
+
+    it('should handle invalid rate limit value', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: 'invalid' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert
+      expect(Number.isNaN(result)).toBe(true);
+    });
+
+    it('should handle negative rate limit', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: '-100' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert
+      expect(result).toBe(-100);
+    });
+
+    it('should handle fractional rate limit (parsed as integer)', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: '1500.75' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert - parseInt truncates decimals
+      expect(result).toBe(1500);
+    });
+
+    it('should handle empty string (falls back to default)', () => {
+      // Arrange
+      setMockEnv({ ANALYTICS_RATE_LIMIT_MS: '' });
+      resetEnvCacheForTesting();
+
+      // Act
+      const result = getAnalyticsRateLimitMs();
+
+      // Assert - empty string parses to default of 1000
+      expect(result).toBe(1000);
     });
   });
 

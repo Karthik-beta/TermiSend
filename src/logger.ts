@@ -265,24 +265,46 @@ class AuditLogger implements Logger {
 }
 
 // ============================================================================
-// Export Singleton Instance
+// Export Singleton Instance - wrapped for test mockability
+// Bun's spyOn cannot mock direct const exports, so we wrap in a container object
 // ============================================================================
 
-export const logger = new AuditLogger();
+const _loggerInstance = new AuditLogger();
+
+/**
+ * Logger instance container - exported as object for spyOn compatibility
+ * Tests can use: spyOn(loggerModule.logger, 'logEvent')
+ */
+export const logger = {
+  logEvent: _loggerInstance.logEvent.bind(_loggerInstance),
+  logUserInput: _loggerInstance.logUserInput.bind(_loggerInstance),
+  logExcelImportStart: _loggerInstance.logExcelImportStart.bind(_loggerInstance),
+  logExcelImportRowValid: _loggerInstance.logExcelImportRowValid.bind(_loggerInstance),
+  logExcelImportRowInvalid: _loggerInstance.logExcelImportRowInvalid.bind(_loggerInstance),
+  logExcelImportComplete: _loggerInstance.logExcelImportComplete.bind(_loggerInstance),
+  logApiVerifierRequest: _loggerInstance.logApiVerifierRequest.bind(_loggerInstance),
+  logApiVerifierResponse: _loggerInstance.logApiVerifierResponse.bind(_loggerInstance),
+  logAwsSesRequest: _loggerInstance.logAwsSesRequest.bind(_loggerInstance),
+  logAwsSesResponse: _loggerInstance.logAwsSesResponse.bind(_loggerInstance),
+  logSendLogUpdated: _loggerInstance.logSendLogUpdated.bind(_loggerInstance),
+  logError: _loggerInstance.logError.bind(_loggerInstance),
+  info: _loggerInstance.info.bind(_loggerInstance),
+  warn: _loggerInstance.warn.bind(_loggerInstance),
+} satisfies Logger;
 
 // ============================================================================
 // Convenience export for direct usage
 // ============================================================================
 
-export const logEvent = logger.logEvent.bind(logger);
-export const logUserInput = logger.logUserInput.bind(logger);
-export const logExcelImportStart = logger.logExcelImportStart.bind(logger);
-export const logExcelImportRowValid = logger.logExcelImportRowValid.bind(logger);
-export const logExcelImportRowInvalid = logger.logExcelImportRowInvalid.bind(logger);
-export const logExcelImportComplete = logger.logExcelImportComplete.bind(logger);
-export const logApiVerifierRequest = logger.logApiVerifierRequest.bind(logger);
-export const logApiVerifierResponse = logger.logApiVerifierResponse.bind(logger);
-export const logAwsSesRequest = logger.logAwsSesRequest.bind(logger);
-export const logAwsSesResponse = logger.logAwsSesResponse.bind(logger);
-export const logSendLogUpdated = logger.logSendLogUpdated.bind(logger);
-export const logError = logger.logError.bind(logger);
+export const logEvent = logger.logEvent;
+export const logUserInput = logger.logUserInput;
+export const logExcelImportStart = logger.logExcelImportStart;
+export const logExcelImportRowValid = logger.logExcelImportRowValid;
+export const logExcelImportRowInvalid = logger.logExcelImportRowInvalid;
+export const logExcelImportComplete = logger.logExcelImportComplete;
+export const logApiVerifierRequest = logger.logApiVerifierRequest;
+export const logApiVerifierResponse = logger.logApiVerifierResponse;
+export const logAwsSesRequest = logger.logAwsSesRequest;
+export const logAwsSesResponse = logger.logAwsSesResponse;
+export const logSendLogUpdated = logger.logSendLogUpdated;
+export const logError = logger.logError;

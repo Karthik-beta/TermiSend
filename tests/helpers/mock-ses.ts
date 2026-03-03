@@ -274,3 +274,298 @@ export function enableSESTestMode(): void {
 export function isSESTestMode(): boolean {
   return testMode;
 }
+
+// ============================================================================
+// SES Analytics Mock Helpers
+// ============================================================================
+
+/**
+ * Mock response for GetSendQuota API
+ */
+export interface MockGetSendQuotaResponse {
+  Max24HourSend?: number;
+  MaxSendRate?: number;
+  SentLast24Hours?: number;
+}
+
+/**
+ * Mock send data point for GetSendStatistics
+ */
+export interface MockSendDataPoint {
+  Timestamp: Date;
+  DeliveryAttempts: number;
+  Bounces: number;
+  Complaints: number;
+  Rejects: number;
+}
+
+/**
+ * Mock response for GetSendStatistics API
+ */
+export interface MockGetSendStatisticsResponse {
+  SendDataPoints: MockSendDataPoint[];
+}
+
+/**
+ * Mock verification attributes for identities
+ */
+export interface MockVerificationAttributes {
+  [identity: string]: {
+    VerificationStatus: 'Pending' | 'Success' | 'Failed' | 'TemporaryFailure' | 'NotStarted';
+  };
+}
+
+/**
+ * Mock response for GetIdentityVerificationAttributes API
+ */
+export interface MockGetIdentityVerificationAttributesResponse {
+  VerificationAttributes: MockVerificationAttributes;
+}
+
+/**
+ * Default mock GetSendQuota response
+ */
+export const defaultMockQuotaResponse: MockGetSendQuotaResponse = {
+  Max24HourSend: 1000,
+  MaxSendRate: 14,
+  SentLast24Hours: 100,
+};
+
+/**
+ * Default mock GetSendStatistics response
+ */
+export const defaultMockStatisticsResponse: MockGetSendStatisticsResponse = {
+  SendDataPoints: [
+    {
+      Timestamp: new Date(),
+      DeliveryAttempts: 100,
+      Bounces: 5,
+      Complaints: 1,
+      Rejects: 2,
+    },
+  ],
+};
+
+/**
+ * Default mock identity list
+ */
+export const defaultMockIdentities: string[] = ['test@example.com', 'example.com'];
+
+/**
+ * Default mock verification attributes
+ */
+export const defaultMockVerificationAttributes: MockVerificationAttributes = {
+  'test@example.com': { VerificationStatus: 'Success' },
+  'example.com': { VerificationStatus: 'Pending' },
+};
+
+/**
+ * Create a mock GetSendQuota response
+ * @param overrides - Properties to override
+ * @returns Mock response
+ */
+export function createMockGetSendQuotaResponse(
+  overrides: Partial<MockGetSendQuotaResponse> = {}
+): MockGetSendQuotaResponse {
+  return {
+    ...defaultMockQuotaResponse,
+    ...overrides,
+  };
+}
+
+/**
+ * Create mock send statistics data points
+ * @param count - Number of data points to create
+ * @returns Array of mock data points
+ */
+export function createMockSendDataPoints(count: number = 2): MockSendDataPoint[] {
+  const points: MockSendDataPoint[] = [];
+  const now = new Date();
+
+  for (let i = 0; i < count; i++) {
+    points.push({
+      Timestamp: new Date(now.getTime() - i * 15 * 60 * 1000), // 15 min intervals
+      DeliveryAttempts: 100 - i * 10,
+      Bounces: 5 - i,
+      Complaints: i % 2,
+      Rejects: 2,
+    });
+  }
+
+  return points;
+}
+
+/**
+ * Create a mock GetSendStatistics response
+ * @param dataPoints - Custom data points (uses default if not provided)
+ * @returns Mock response
+ */
+export function createMockGetSendStatisticsResponse(
+  dataPoints?: MockSendDataPoint[]
+): MockGetSendStatisticsResponse {
+  return {
+    SendDataPoints: dataPoints ?? createMockSendDataPoints(),
+  };
+}
+
+/**
+ * Create mock identity statuses
+ * @param identities - Array of identity strings
+ * @returns Mock verification attributes
+ */
+export function createMockVerificationAttributes(
+  identities: string[] = defaultMockIdentities
+): MockVerificationAttributes {
+  const attributes: MockVerificationAttributes = {};
+  const statuses: Array<'Pending' | 'Success' | 'Failed' | 'TemporaryFailure' | 'NotStarted'> = [
+    'Success',
+    'Pending',
+    'Failed',
+    'Success',
+  ];
+
+  for (let i = 0; i < identities.length; i++) {
+    attributes[identities[i]] = {
+      VerificationStatus: statuses[i % statuses.length],
+    };
+  }
+
+  return attributes;
+}
+
+/**
+ * SES Analytics Mock State
+ */
+const analyticsMockState: {
+  quotaResponse: MockGetSendQuotaResponse;
+  statisticsResponse: MockGetSendStatisticsResponse;
+  identities: string[];
+  verificationAttributes: MockVerificationAttributes;
+  callCount: {
+    getSendQuota: number;
+    getSendStatistics: number;
+    listIdentities: number;
+    getIdentityVerificationAttributes: number;
+  };
+} = {
+  quotaResponse: defaultMockQuotaResponse,
+  statisticsResponse: defaultMockStatisticsResponse,
+  identities: defaultMockIdentities,
+  verificationAttributes: defaultMockVerificationAttributes,
+  callCount: {
+    getSendQuota: 0,
+    getSendStatistics: 0,
+    listIdentities: 0,
+    getIdentityVerificationAttributes: 0,
+  },
+};
+
+/**
+ * Reset SES analytics mock state
+ */
+export function resetAnalyticsMockState(): void {
+  analyticsMockState.quotaResponse = defaultMockQuotaResponse;
+  analyticsMockState.statisticsResponse = defaultMockStatisticsResponse;
+  analyticsMockState.identities = defaultMockIdentities;
+  analyticsMockState.verificationAttributes = defaultMockVerificationAttributes;
+  analyticsMockState.callCount = {
+    getSendQuota: 0,
+    getSendStatistics: 0,
+    listIdentities: 0,
+    getIdentityVerificationAttributes: 0,
+  };
+}
+
+/**
+ * Set mock GetSendQuota response
+ * @param response - Response to return
+ */
+export function setMockQuotaResponse(response: MockGetSendQuotaResponse): void {
+  analyticsMockState.quotaResponse = response;
+}
+
+/**
+ * Set mock GetSendStatistics response
+ * @param response - Response to return
+ */
+export function setMockStatisticsResponse(response: MockGetSendStatisticsResponse): void {
+  analyticsMockState.statisticsResponse = response;
+}
+
+/**
+ * Set mock identities list
+ * @param identities - Array of identity strings
+ */
+export function setMockIdentities(identities: string[]): void {
+  analyticsMockState.identities = identities;
+}
+
+/**
+ * Set mock verification attributes
+ * @param attributes - Verification attributes by identity
+ */
+export function setMockVerificationAttributes(attributes: MockVerificationAttributes): void {
+  analyticsMockState.verificationAttributes = attributes;
+}
+
+/**
+ * Get analytics mock call counts
+ * @returns Call counts for each analytics API
+ */
+export function getAnalyticsCallCounts(): {
+  getSendQuota: number;
+  getSendStatistics: number;
+  listIdentities: number;
+  getIdentityVerificationAttributes: number;
+} {
+  return { ...analyticsMockState.callCount };
+}
+
+/**
+ * Get a mock SES client that supports analytics APIs
+ * Enhanced version that handles both sending and analytics commands
+ */
+export function getMockSESAnalyticsClient(): {
+  send: (command: unknown) => Promise<unknown>;
+} {
+  return {
+    send: async (command: unknown): Promise<unknown> => {
+      const commandName = (command as { constructor?: { name?: string } })?.constructor?.name || '';
+
+      switch (commandName) {
+        case 'GetSendQuotaCommand': {
+          analyticsMockState.callCount.getSendQuota++;
+          return analyticsMockState.quotaResponse;
+        }
+        case 'GetSendStatisticsCommand': {
+          analyticsMockState.callCount.getSendStatistics++;
+          return analyticsMockState.statisticsResponse;
+        }
+        case 'ListIdentitiesCommand': {
+          analyticsMockState.callCount.listIdentities++;
+          return { Identities: analyticsMockState.identities };
+        }
+        case 'GetIdentityVerificationAttributesCommand': {
+          analyticsMockState.callCount.getIdentityVerificationAttributes++;
+          const cmd = command as { Identities?: string[] };
+          const requestedIdentities = cmd.Identities || analyticsMockState.identities;
+          const filteredAttributes: MockVerificationAttributes = {};
+
+          for (const identity of requestedIdentities) {
+            if (analyticsMockState.verificationAttributes[identity]) {
+              filteredAttributes[identity] = analyticsMockState.verificationAttributes[identity];
+            }
+          }
+
+          return { VerificationAttributes: filteredAttributes };
+        }
+        default: {
+          // Fall back to standard mock implementation
+          mockSESState.callCount++;
+          mockSESState.calls.push(command);
+          return mockSESState.sendImplementation(command);
+        }
+      }
+    },
+  };
+}
