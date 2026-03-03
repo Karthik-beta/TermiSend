@@ -233,12 +233,6 @@ class AuditLogger implements Logger {
       errorType,
       ...additionalData,
     });
-
-    // In development mode, also log to console with stack trace for debugging
-    if (isDevelopment() && error instanceof Error && error.stack) {
-      console.error(`❌ [${context}] ${errorType}:`, errorMessage);
-      console.error('   Stack trace:', error.stack);
-    }
   }
 
   /**
