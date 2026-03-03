@@ -6,6 +6,13 @@
 import ExcelJs from 'exceljs';
 import { z } from 'zod';
 import { insertContactSkipDuplicate } from './db.js';
+import {
+  type ContactDuplicateSkippedPayload,
+  type ContactImportedPayload,
+  createEvent,
+  DomainEventType,
+  domainEvents,
+} from './events/index.js';
 import { logger } from './logger.js';
 import { validateImportPath } from './path-validator.js';
 import type { ContactInput, ImportResult } from './types.js';
@@ -94,7 +101,8 @@ async function processRow(
   rowNumber: number,
   headerStrings: string[],
   result: ImportResult,
-  seenEmails: Set<string>
+  seenEmails: Set<string>,
+  sourceFile: string
 ): Promise<void> {
   // Skip empty rows
   if (row.values === null || row.values === undefined) {
@@ -132,23 +140,67 @@ async function processRow(
   if (seenEmails.has(email)) {
     result.skippedCount++;
     await logger.logExcelImportRowInvalid(rowNumber, 'Duplicate email in file', normalizedData);
+    // Emit duplicate skipped event for file-internal duplicate
+    try {
+      const event = createEvent<ContactDuplicateSkippedPayload>(
+        DomainEventType.CONTACT_DUPLICATE_SKIPPED,
+        {
+          email,
+          sourceFile,
+          rowNumber,
+          duplicateSource: 'file',
+        }
+      );
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
+    }
     return;
   }
   seenEmails.add(email);
 
   try {
     // Insert contact, skip if already exists in DB
-    const inserted = await insertContactSkipDuplicate(
+    const insertedContact = await insertContactSkipDuplicate(
       validation.data.companyName,
       validation.data.personName,
       validation.data.email
     );
 
-    if (inserted) {
+    if (insertedContact) {
       result.insertedCount++;
       result.successCount++; // Keep for backward compatibility
+      // Emit contact imported event
+      try {
+        const event = createEvent<ContactImportedPayload>(DomainEventType.CONTACT_IMPORTED, {
+          contactId: insertedContact.id,
+          email: insertedContact.email,
+          companyName: insertedContact.companyName,
+          personName: insertedContact.personName,
+          sourceFile,
+          rowNumber,
+        });
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
     } else {
       result.existingCount++;
+      // Emit duplicate skipped event for database duplicate
+      try {
+        const event = createEvent<ContactDuplicateSkippedPayload>(
+          DomainEventType.CONTACT_DUPLICATE_SKIPPED,
+          {
+            email,
+            sourceFile,
+            rowNumber,
+            duplicateSource: 'database',
+          }
+        );
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
     }
     await logger.logExcelImportRowValid(rowNumber, { rowNumber });
   } catch (error) {
@@ -233,7 +285,14 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
 
     // Process each row
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
-      await processRow(worksheet.getRow(rowNumber), rowNumber, headerStrings, result, seenEmails);
+      await processRow(
+        worksheet.getRow(rowNumber),
+        rowNumber,
+        headerStrings,
+        result,
+        seenEmails,
+        sanitizedPath
+      );
     }
 
     // Log import completion

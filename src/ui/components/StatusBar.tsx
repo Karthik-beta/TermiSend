@@ -57,6 +57,7 @@ export function StatusBar({
       {/* Keyboard Shortcuts */}
       <Box gap={2}>
         {shortcuts.map((shortcut, index) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static shortcut list
           <Text key={`shortcut-${index}`} dimColor={true}>
             {shortcut}
           </Text>

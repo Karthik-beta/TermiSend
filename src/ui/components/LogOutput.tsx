@@ -35,6 +35,7 @@ export function LogOutput({
       {recentEntries.length > 0 ? (
         <Box flexDirection="column">
           {recentEntries.map((entry, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static log display
             <Box key={`log-${index}`} flexDirection="row" gap={1}>
               <Text color={getStatusColor(entry.status)}>{getStatusIcon(entry.status)}</Text>
               <Text dimColor={true} wrap="truncate-end">

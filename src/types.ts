@@ -332,3 +332,157 @@ export interface SendStats {
   sentLast24Hours: number;
   failedLast24Hours: number;
 }
+
+// ============================================================================
+// SES Analytics Types
+// ============================================================================
+
+/**
+ * Analytics event types for message tracking
+ * Aligned with AWS SES event types
+ */
+export type AnalyticsEventType =
+  | 'SEND'
+  | 'DELIVERY'
+  | 'BOUNCE'
+  | 'COMPLAINT'
+  | 'REJECT'
+  | 'FAILURE';
+
+/**
+ * Verification status for SES identities
+ * Based on AWS SES GetIdentityVerificationAttributes API
+ * @see https://docs.aws.amazon.com/ses/latest/APIReference/API_GetIdentityVerificationAttributes.html
+ */
+export type IdentityVerificationStatus =
+  | 'Pending'
+  | 'Success'
+  | 'Failed'
+  | 'TemporaryFailure'
+  | 'NotStarted';
+
+/**
+ * DKIM verification status
+ * Based on AWS SES GetIdentityDkimAttributes API
+ */
+export type DkimVerificationStatus = 'Pending' | 'Success' | 'Failed' | 'NotStarted';
+
+/**
+ * Source of quota data - indicates if data came from API or cache
+ */
+export type QuotaSource = 'api' | 'cached';
+
+/**
+ * SES quota snapshot from GetSendQuota API
+ * Tracks periodic quota measurements for historical analysis
+ * @see https://docs.aws.amazon.com/ses/latest/APIReference/API_GetSendQuota.html
+ */
+export interface QuotaSnapshot {
+  /** Maximum number of emails allowed per 24-hour period */
+  max24HourSend: number;
+  /** Maximum number of emails allowed per second */
+  maxSendRate: number;
+  /** Number of emails sent in the last 24 hours */
+  sentLast24Hours: number;
+  /** When this snapshot was recorded */
+  recordedAt: Date;
+  /** Source of the data - 'api' for fresh fetch, 'cached' if from local cache */
+  source: QuotaSource;
+}
+
+/**
+ * Single data point from GetSendStatistics API
+ * Represents a 15-minute period of sending activity
+ * @see https://docs.aws.amazon.com/ses/latest/APIReference/API_GetSendStatistics.html
+ */
+export interface SendStatistics {
+  /** The time when this data point was recorded */
+  timestamp: Date;
+  /** Number of delivery attempts during this period */
+  deliveryAttempts: number;
+  /** Number of emails that bounced during this period */
+  bounces: number;
+  /** Number of complaint notifications received during this period */
+  complaints: number;
+  /** Number of emails rejected by SES during this period */
+  rejects: number;
+  /** When this data point was fetched from the API */
+  fetchedAt: Date;
+}
+
+/**
+ * SES identity verification status
+ * Tracks verification state for email addresses and domains
+ * @see https://docs.aws.amazon.com/ses/latest/APIReference/API_GetIdentityVerificationAttributes.html
+ */
+export interface IdentityStatus {
+  /** The identity (email address or domain) */
+  identity: string;
+  /** Current verification status */
+  verificationStatus: IdentityVerificationStatus;
+  /** Whether DKIM is enabled for this identity */
+  dkimEnabled: boolean;
+  /** DKIM verification status if enabled */
+  dkimVerificationStatus: DkimVerificationStatus | null;
+  /** When this status was last checked */
+  checkedAt: Date;
+}
+
+/**
+ * Internal message event for event-driven analytics
+ * Tracks email lifecycle events from internal system perspective
+ */
+export interface MessageEvent {
+  /** Type of event that occurred */
+  eventType: AnalyticsEventType;
+  /** SES message ID (available for SEND events) */
+  messageId?: string;
+  /** Reference to the contact in the contacts table */
+  contactId: string;
+  /** Reference to the send log entry */
+  sendLogId: string;
+  /** Flexible storage for event-specific data */
+  eventData: Record<string, unknown>;
+  /** When the event occurred in the real world */
+  occurredAt: Date;
+}
+
+/**
+ * Analytics configuration options
+ */
+export interface AnalyticsConfig {
+  /** Whether analytics collection is enabled */
+  enabled: boolean;
+  /** How often to sync analytics data from SES APIs (in minutes) */
+  syncIntervalMinutes: number;
+  /** How long to retain analytics data (in days) */
+  retentionDays: number;
+}
+
+/**
+ * Options for analytics sync operations
+ */
+export interface SyncOptions {
+  /** Start date for statistics fetch (defaults to 14 days ago) */
+  startDate?: Date;
+  /** End date for statistics fetch (defaults to now) */
+  endDate?: Date;
+  /** Force refresh even if cache is fresh */
+  force?: boolean;
+}
+
+/**
+ * Result of analytics sync operation
+ */
+export interface SyncResult {
+  /** Whether the sync was successful */
+  success: boolean;
+  /** Number of quota snapshots stored */
+  quotaSnapshotsStored: number;
+  /** Number of send statistics data points stored */
+  sendStatisticsStored: number;
+  /** Number of identity statuses stored */
+  identityStatusesStored: number;
+  /** Error message if sync failed */
+  error?: string;
+}

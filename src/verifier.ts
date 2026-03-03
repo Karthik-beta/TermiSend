@@ -5,6 +5,12 @@
 
 import { getEnv, shouldSimulateVerifier } from './config.js';
 import { updateEmailVerifierCredits } from './db.js';
+import {
+  createEvent,
+  DomainEventType,
+  domainEvents,
+  type VerifierApiCalledPayload,
+} from './events/index.js';
 import { logger } from './logger.js';
 import { delay } from './throttle.js';
 import type { EmailVerificationResponse } from './types.js';
@@ -169,6 +175,10 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
   const url = new URL(`${API_BASE_URL}/verify`);
   url.searchParams.append('email', email);
 
+  const apiCallStartTime = Date.now();
+  let apiCallSuccess = false;
+  let apiCallError: string | undefined;
+
   try {
     const response = await fetch(url.toString(), {
       method: 'GET',
@@ -180,6 +190,7 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
 
     if (!response.ok) {
       const errorText = await response.text();
+      apiCallError = `API request failed: ${response.status} ${response.statusText}`;
       throw new Error(
         `API request failed: ${response.status} ${response.statusText} - ${errorText}`
       );
@@ -188,10 +199,25 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
     // Validate response with Zod schema (security: prevent blind type casts)
     const rawData: unknown = await response.json();
     const validatedData = validateEmailVerificationResponse(rawData);
+    apiCallSuccess = true;
 
     // Log the response (email is redacted inside logger)
     const responseData: Record<string, unknown> = { ...validatedData };
     await logger.logApiVerifierResponse(email, responseData);
+
+    // Emit VERIFIER_API_CALLED event (fire-and-forget)
+    const apiCallDuration = Date.now() - apiCallStartTime;
+    try {
+      const event = createEvent<VerifierApiCalledPayload>(DomainEventType.VERIFIER_API_CALLED, {
+        email: redactEmail(email),
+        durationMs: apiCallDuration,
+        success: apiCallSuccess,
+        error: apiCallError,
+      });
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
+    }
 
     // Event-driven: Fetch and update credits after each verification API call
     // This is intentionally fire-and-forget (non-blocking) and best-effort.
@@ -205,6 +231,20 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
   } catch (error) {
     // Don't log the full email in error messages (security)
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // Emit VERIFIER_API_CALLED event for failed call (fire-and-forget)
+    const apiCallDuration = Date.now() - apiCallStartTime;
+    try {
+      const event = createEvent<VerifierApiCalledPayload>(DomainEventType.VERIFIER_API_CALLED, {
+        email: redactEmail(email),
+        durationMs: apiCallDuration,
+        success: false,
+        error: errorMessage,
+      });
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
+    }
 
     // Log error with redacted email
     await logger.logError('Email Verification API', errorMessage, {

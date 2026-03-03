@@ -6,6 +6,7 @@
 /** @jsxImportSource react */
 import { render } from 'ink';
 import { closeConnection, initializeSchema } from './db.js';
+import { domainEvents, registerAllAnalyticsHandlers } from './events/index.js';
 import App from './ui/index.js';
 
 // ============================================================================
@@ -14,9 +15,10 @@ import App from './ui/index.js';
 
 async function main(): Promise<void> {
   try {
-    console.log('🚀 Starting TermiSend...');
     await initializeSchema();
-    console.log('✓ Database connected');
+
+    // Register analytics event handlers
+    registerAllAnalyticsHandlers(domainEvents);
 
     // Render the Ink UI
     const { waitUntilExit } = render(<App />);

@@ -80,6 +80,7 @@ export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.R
         <CampaignStatus progress={liveProgress} isRunning={true} />
         <Panel title="📋 Campaign Log" borderColor={colors.gray}>
           {logEntries.slice(-5).map((entry, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static log display
             <Box key={`log-${index}`}>
               <Text>
                 {entry.email} - {entry.status}

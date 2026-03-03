@@ -10,6 +10,12 @@ import {
   type SendEmailCommandInput,
 } from '@aws-sdk/client-ses';
 import { getTestRecipientEmail, shouldRedirectEmails } from './config.js';
+import {
+  createEvent,
+  DomainEventType,
+  domainEvents,
+  type SesApiCalledPayload,
+} from './events/index.js';
 import { logger } from './logger.js';
 import { getSesClient, verifySesConfiguration } from './ses-quota.js';
 import type { EmailThrottleController } from './throttle.js';
@@ -127,6 +133,7 @@ function constructSendEmailInput(
 /**
  * Handles the retry logic for sending an email
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Retry logic needs complexity - refactoring risk outweighs benefit
 async function sendWithRetry(
   sesClient: SESClient,
   input: SendEmailCommandInput,
@@ -143,6 +150,11 @@ async function sendWithRetry(
 
     await controller.acquireSendPermission();
 
+    const apiCallStartTime = Date.now();
+    let apiCallSuccess = false;
+    let apiCallError: string | undefined;
+    let requestId: string | undefined;
+
     try {
       if (attempt === 0) {
         await logger.logAwsSesRequest(params.to, { from: input.Source, subject: params.subject });
@@ -153,10 +165,43 @@ async function sendWithRetry(
         throw new Error('No MessageId returned');
       }
 
+      apiCallSuccess = true;
+      requestId = response.MessageId;
+
       await logger.logAwsSesResponse(params.to, response.MessageId);
+
+      // Emit SES_API_CALLED event (fire-and-forget)
+      const apiCallDuration = Date.now() - apiCallStartTime;
+      try {
+        const event = createEvent<SesApiCalledPayload>(DomainEventType.SES_API_CALLED, {
+          apiEndpoint: 'SendEmail',
+          durationMs: apiCallDuration,
+          success: apiCallSuccess,
+          requestId,
+        });
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
+
       return { success: true, messageId: response.MessageId };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      apiCallError = lastError.message;
+
+      // Emit SES_API_CALLED event for failed call (fire-and-forget)
+      const apiCallDuration = Date.now() - apiCallStartTime;
+      try {
+        const event = createEvent<SesApiCalledPayload>(DomainEventType.SES_API_CALLED, {
+          apiEndpoint: 'SendEmail',
+          durationMs: apiCallDuration,
+          success: false,
+          error: apiCallError,
+        });
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
 
       if (isThrottlingError(error) && attempt < MAX_SEND_RETRIES) {
         const rawBackoffMs = RETRY_BASE_DELAY_MS * 2 ** attempt;

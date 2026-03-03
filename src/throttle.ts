@@ -4,6 +4,15 @@
  */
 
 import { getQuotaBufferPercent, getSesRateLimit, getThrottleConfig } from './config.js';
+import {
+  createEvent,
+  DomainEventType,
+  domainEvents,
+  type QuotaCheckFailedPayload,
+  type QuotaCheckPassedPayload,
+  type ThrottleDelayCompletedPayload,
+  type ThrottleDelayStartedPayload,
+} from './events/index.js';
 import { logger } from './logger.js';
 import { getAccountInfo } from './ses-quota.js';
 import type { DelayResult, QuotaStatus, RateLimiter, ThrottleConfig } from './types.js';
@@ -529,7 +538,8 @@ export class EmailThrottleController {
    * @returns DelayResult with information about the delay
    */
   async waitBeforeSend(
-    onProgress?: (remainingMs: number, totalMs: number) => void
+    onProgress?: (remainingMs: number, totalMs: number) => void,
+    contactId?: string
   ): Promise<DelayResult> {
     // Get fresh config
     this.config = getThrottleConfig();
@@ -541,6 +551,22 @@ export class EmailThrottleController {
     await logger.info(
       `Throttle delay: waiting ${delayResult.totalDelayMs}ms before next send (base=${delayResult.baseDelayMs}ms, break=${delayResult.breakTriggered})`
     );
+
+    // Emit THROTTLE_DELAY_STARTED event (fire-and-forget)
+    const delayStartTime = Date.now();
+    try {
+      const event = createEvent<ThrottleDelayStartedPayload>(
+        DomainEventType.THROTTLE_DELAY_STARTED,
+        {
+          delayMs: delayResult.totalDelayMs,
+          reason: delayResult.breakTriggered ? 'random_break' : 'rate_limit',
+          contactId: contactId || 'unknown',
+        }
+      );
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
+    }
 
     // Execute the delay with progress callbacks if provided
     if (onProgress && delayResult.totalDelayMs > 0) {
@@ -570,6 +596,22 @@ export class EmailThrottleController {
     } else {
       // Execute the delay without progress updates
       await delay(delayResult.totalDelayMs);
+    }
+
+    // Emit THROTTLE_DELAY_COMPLETED event (fire-and-forget)
+    const actualDelayMs = Date.now() - delayStartTime;
+    try {
+      const event = createEvent<ThrottleDelayCompletedPayload>(
+        DomainEventType.THROTTLE_DELAY_COMPLETED,
+        {
+          actualDelayMs,
+          plannedDelayMs: delayResult.totalDelayMs,
+          contactId: contactId || 'unknown',
+        }
+      );
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
     }
 
     return delayResult;
@@ -603,11 +645,34 @@ export class EmailThrottleController {
    */
   async checkQuota(): Promise<boolean> {
     const canSend = await this.quotaMonitor.checkQuota();
+    const quotaStatus = this.quotaMonitor.getStatus();
 
     if (canSend) {
       await logger.info('Quota check passed');
+      // Emit QUOTA_CHECK_PASSED event (fire-and-forget)
+      try {
+        const event = createEvent<QuotaCheckPassedPayload>(DomainEventType.QUOTA_CHECK_PASSED, {
+          availableQuota: quotaStatus?.remainingQuota || 0,
+          requiredQuota: 1,
+          bufferPercentage: this.config.breakProbabilityPercent,
+        });
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
     } else {
       await logger.warn('Quota check failed - approaching limit');
+      // Emit QUOTA_CHECK_FAILED event (fire-and-forget)
+      try {
+        const event = createEvent<QuotaCheckFailedPayload>(DomainEventType.QUOTA_CHECK_FAILED, {
+          availableQuota: quotaStatus?.remainingQuota || 0,
+          requiredQuota: 1,
+          reason: 'insufficient_quota',
+        });
+        domainEvents.emit(event);
+      } catch {
+        // Silently ignore event emission errors
+      }
     }
 
     return canSend;

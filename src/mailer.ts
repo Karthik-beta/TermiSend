@@ -3,13 +3,31 @@
  * Handles spintax parsing, markdown rendering, and email template processing
  */
 
+// Node built-ins
 import { readFile } from 'node:fs/promises';
+
+// External libraries
 import { marked } from 'marked';
+
+// Local modules (alphabetical)
 import { createSendLog, getEligibleContacts, updateSendLog } from './db.js';
+import {
+  type CampaignCompletedPayload,
+  type CampaignStartedPayload,
+  createEvent,
+  DomainEventType,
+  domainEvents,
+  type EmailFailedPayload,
+  type EmailSendRequestedPayload,
+  type EmailSentPayload,
+  type EmailSkippedPayload,
+} from './events/index.js';
 import { logger } from './logger.js';
 import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
+import { analyticsEvents } from './ses-analytics.js';
 import { EmailThrottleController, getEmailThrottleController } from './throttle.js';
+// Type imports
 import type {
   CampaignResult,
   Contact,
@@ -307,6 +325,18 @@ async function handleUnsafeEmail(
     email: contact.email,
     reason: `Email verification failed: ${verificationResult.status}`,
   });
+  // Emit EMAIL_SKIPPED event (fire-and-forget)
+  try {
+    const event = createEvent<EmailSkippedPayload>(DomainEventType.EMAIL_SKIPPED, {
+      contactId: contact.id,
+      sendLogId,
+      reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
+      skipCategory: 'unsafe_email',
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
@@ -339,13 +369,15 @@ async function handleDryRun(
 /**
  * Handle successful email send
  * Updates send log with 'sent' status and message ID
+ * Emits analytics event for tracking
  */
 async function handleSuccessfulSend(
   contact: Contact,
   messageId: string,
   result: CampaignResult,
   sendLogId: string,
-  subject: string
+  subject: string,
+  mode: SendMode
 ): Promise<void> {
   result.sentCount++;
   result.details.push({
@@ -364,11 +396,33 @@ async function handleSuccessfulSend(
     subject,
     messageId,
   });
+  // Emit analytics event
+  analyticsEvents.emit('SEND', {
+    messageId,
+    contactId: contact.id,
+    sendLogId,
+    timestamp: new Date(),
+    details: { subject, email: contact.email },
+  });
+  // Emit EMAIL_SENT domain event (fire-and-forget)
+  try {
+    const event = createEvent<EmailSentPayload>(DomainEventType.EMAIL_SENT, {
+      contactId: contact.id,
+      sendLogId,
+      messageId,
+      subject,
+      mode,
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
  * Handle failed email send
  * Updates send log with 'failed' status and error reason
+ * Emits analytics event for tracking
  */
 async function handleFailedSend(
   contact: Contact,
@@ -393,6 +447,25 @@ async function handleFailedSend(
     subject,
     error: errorReason,
   });
+  // Emit analytics event
+  analyticsEvents.emit('FAILURE', {
+    contactId: contact.id,
+    sendLogId,
+    timestamp: new Date(),
+    details: { subject, email: contact.email, error: errorReason },
+  });
+  // Emit EMAIL_FAILED domain event (fire-and-forget)
+  try {
+    const event = createEvent<EmailFailedPayload>(DomainEventType.EMAIL_FAILED, {
+      contactId: contact.id,
+      sendLogId,
+      errorReason,
+      errorCategory: 'ses_error',
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
@@ -558,6 +631,19 @@ async function processContact(
     textBody,
   };
 
+  // Emit EMAIL_SEND_REQUESTED event (fire-and-forget)
+  try {
+    const event = createEvent<EmailSendRequestedPayload>(DomainEventType.EMAIL_SEND_REQUESTED, {
+      contactId: contact.id,
+      sendLogId,
+      subject,
+      mode,
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
+
   const sendResult = await sendEmail(emailParams, throttleController);
 
   if (sendResult.success) {
@@ -566,7 +652,8 @@ async function processContact(
       sendResult.messageId || 'unknown',
       result,
       sendLogId,
-      subject
+      subject,
+      mode
     );
     await reportProgress(onProgress, {
       currentContact: current,
@@ -655,6 +742,22 @@ export async function runCampaign(
     // Read template file
     const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
 
+    // Determine mode
+    const mode: SendMode = dryRun ? 'dry_run' : 'production';
+
+    // Emit CAMPAIGN_STARTED event (fire-and-forget)
+    const campaignStartTime = Date.now();
+    try {
+      const event = createEvent<CampaignStartedPayload>(DomainEventType.CAMPAIGN_STARTED, {
+        totalContacts: contacts.length,
+        mode,
+        templatePath: sanitizedTemplatePath,
+      });
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
+    }
+
     // Process each contact
     for (let i = 0; i < contacts.length; i++) {
       const contact = contacts[i];
@@ -674,7 +777,6 @@ export async function runCampaign(
         // before creating one (e.g., during template processing)
         const { subject, body } = extractSubject(processTemplate(templateContent, contact));
         const bodyPreview = body.substring(0, 500);
-        const mode: SendMode = dryRun ? 'dry_run' : 'production';
         const errorLog = await createSendLog(contact.id, mode, subject, bodyPreview);
         await handleContactError(contact, error, result, errorLog.id);
         // Report the error via progress callback
@@ -686,6 +788,21 @@ export async function runCampaign(
           message: `Error processing ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
+    }
+
+    // Emit CAMPAIGN_COMPLETED event (fire-and-forget)
+    const campaignDuration = Date.now() - campaignStartTime;
+    try {
+      const event = createEvent<CampaignCompletedPayload>(DomainEventType.CAMPAIGN_COMPLETED, {
+        totalContacts: result.totalContacts,
+        sentCount: result.sentCount,
+        failedCount: result.failedCount,
+        skippedCount: result.skippedCount,
+        durationMs: campaignDuration,
+      });
+      domainEvents.emit(event);
+    } catch {
+      // Silently ignore event emission errors
     }
 
     return result;

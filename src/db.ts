@@ -8,14 +8,20 @@
 
 import postgres from 'postgres';
 import { getEnv } from './config.js';
+import { logger } from './logger.js';
 import type {
+  AnalyticsEventType,
   AuditLog,
   Contact,
   EmailVerifierCredits,
+  IdentityStatus,
   JSONValue,
   LogStatus,
+  MessageEvent,
+  QuotaSnapshot,
   SendLog,
   SendMode,
+  SendStatistics,
   SendStats,
 } from './types.js';
 import { isProduction } from './utils/security.js';
@@ -215,16 +221,242 @@ export async function initializeSchema(): Promise<void> {
       )
     `;
 
+    // ============================================================================
+    // SES Analytics Tables
+    // ============================================================================
+
+    // Create ses_quota_snapshots table for periodic quota tracking
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_quota_snapshots (
+        id SERIAL PRIMARY KEY,
+        max_24_hour_send DOUBLE PRECISION NOT NULL,
+        sent_last_24_hours DOUBLE PRECISION NOT NULL,
+        max_send_rate DOUBLE PRECISION NOT NULL,
+        recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        source TEXT NOT NULL DEFAULT 'api'
+      )
+    `;
+
+    // Create index on recorded_at for efficient time-based queries
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_quota_snapshots_recorded_at ON ses_quota_snapshots(recorded_at)
+    `;
+
+    // Create ses_send_statistics table for historical 15-minute data points
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_send_statistics (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMP WITH TIME ZONE NOT NULL UNIQUE,
+        delivery_attempts BIGINT NOT NULL DEFAULT 0,
+        bounces BIGINT NOT NULL DEFAULT 0,
+        complaints BIGINT NOT NULL DEFAULT 0,
+        rejects BIGINT NOT NULL DEFAULT 0,
+        fetched_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create index on timestamp for efficient queries
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_send_statistics_timestamp ON ses_send_statistics(timestamp)
+    `;
+
+    // Create ses_identity_status table for identity verification tracking
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_identity_status (
+        id SERIAL PRIMARY KEY,
+        identity TEXT NOT NULL UNIQUE,
+        verification_status TEXT NOT NULL DEFAULT 'NotStarted',
+        dkim_enabled BOOLEAN DEFAULT FALSE,
+        dkim_verification_status TEXT,
+        checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create index on identity for faster lookups
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_identity_status_identity ON ses_identity_status(identity)
+    `;
+
+    // Create ses_message_events table for internal event tracking
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_message_events (
+        id SERIAL PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        message_id TEXT,
+        contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+        send_log_id UUID REFERENCES send_logs(id) ON DELETE SET NULL,
+        event_data JSONB DEFAULT '{}',
+        occurred_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create indexes on message_events for common query patterns
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_message_events_event_type ON ses_message_events(event_type)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_message_events_contact_id ON ses_message_events(contact_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_message_events_occurred_at ON ses_message_events(occurred_at)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_message_events_message_id ON ses_message_events(message_id)
+    `;
+
     // Success message for CLI usage
     if (require.main === module || process.argv[1]?.includes('db.ts')) {
       const dbConfig = getDbConfig();
-      console.log('✅ Database initialized successfully!');
-      console.log(`   Database: ${dbConfig.database}`);
-      console.log('   Tables: contacts, send_logs, audit_logs, email_verifier_credits');
+      logger.info('✅ Database initialized successfully!');
+      logger.info(`   Database: ${dbConfig.database}`);
+      logger.info(
+        '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events'
+      );
     }
   } catch (error) {
     throw new Error(
       `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+// ============================================================================
+// Analytics Tables Initialization
+// ============================================================================
+
+/**
+ * Initialize analytics tables for event tracking and metrics
+ * Creates tables if they don't exist - safe to call multiple times
+ *
+ * Analytics tables are kept separate from business tables to:
+ * - Prevent analytics failures from affecting business operations
+ * - Allow for independent scaling and optimization
+ * - Enable future data retention policies
+ */
+export async function createAnalyticsTables(): Promise<void> {
+  try {
+    // Create analytics_events table (general event store)
+    await sql`
+      CREATE TABLE IF NOT EXISTS analytics_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_type VARCHAR(100) NOT NULL,
+        event_id VARCHAR(100) NOT NULL UNIQUE,
+        correlation_id VARCHAR(100),
+        contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+        send_log_id UUID REFERENCES send_logs(id) ON DELETE SET NULL,
+        campaign_id UUID,
+        payload JSONB NOT NULL,
+        occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create indexes for analytics_events
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_event_type ON analytics_events(event_type)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_contact_id ON analytics_events(contact_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_occurred_at ON analytics_events(occurred_at)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_correlation_id ON analytics_events(correlation_id)
+    `;
+
+    // Create verification_metrics table
+    await sql`
+      CREATE TABLE IF NOT EXISTS verification_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        date DATE NOT NULL,
+        total_verified INTEGER NOT NULL DEFAULT 0,
+        valid_emails INTEGER NOT NULL DEFAULT 0,
+        invalid_emails INTEGER NOT NULL DEFAULT 0,
+        unknown_emails INTEGER NOT NULL DEFAULT 0,
+        average_response_time_ms DECIMAL(10,2),
+        api_calls INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(date)
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_verification_metrics_date ON verification_metrics(date)
+    `;
+
+    // Create send_outcome_metrics table
+    await sql`
+      CREATE TABLE IF NOT EXISTS send_outcome_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        date DATE NOT NULL,
+        campaign_id UUID,
+        total_requested INTEGER NOT NULL DEFAULT 0,
+        successfully_sent INTEGER NOT NULL DEFAULT 0,
+        failed_sends INTEGER NOT NULL DEFAULT 0,
+        skipped_sends INTEGER NOT NULL DEFAULT 0,
+        average_send_time_ms DECIMAL(10,2),
+        ses_api_calls INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(date, campaign_id)
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_outcome_metrics_date ON send_outcome_metrics(date)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_outcome_metrics_campaign_id ON send_outcome_metrics(campaign_id)
+    `;
+
+    // Create ses_api_metrics table
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_api_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        date DATE NOT NULL,
+        api_endpoint VARCHAR(50) NOT NULL,
+        total_calls INTEGER NOT NULL DEFAULT 0,
+        successful_calls INTEGER NOT NULL DEFAULT 0,
+        failed_calls INTEGER NOT NULL DEFAULT 0,
+        average_response_time_ms DECIMAL(10,2),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(date, api_endpoint)
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_api_metrics_date ON ses_api_metrics(date)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_api_metrics_endpoint ON ses_api_metrics(api_endpoint)
+    `;
+
+    // Create throttling_metrics table
+    await sql`
+      CREATE TABLE IF NOT EXISTS throttling_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        date DATE NOT NULL,
+        total_delays INTEGER NOT NULL DEFAULT 0,
+        total_delay_time_ms BIGINT NOT NULL DEFAULT 0,
+        average_delay_ms DECIMAL(10,2),
+        quota_checks_passed INTEGER NOT NULL DEFAULT 0,
+        quota_checks_failed INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(date)
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_throttling_metrics_date ON throttling_metrics(date)
+    `;
+
+    logger.info('✅ Analytics tables initialized successfully!');
+  } catch (error) {
+    // Log error but don't throw - analytics failures should not crash the app
+    await logger.logError(
+      'Failed to initialize analytics tables',
+      error instanceof Error ? error : new Error(String(error))
+    );
+    // Re-throw to let caller decide how to handle
+    throw new Error(
+      `Failed to initialize analytics tables: ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }
@@ -254,20 +486,20 @@ export async function insertContact(
 
 /**
  * Insert a new contact into the database, skipping if email already exists
- * @returns true if inserted, false if skipped due to duplicate
+ * @returns The inserted contact if successful, null if skipped due to duplicate
  */
 export async function insertContactSkipDuplicate(
   companyName: string,
   personName: string,
   email: string
-): Promise<boolean> {
+): Promise<Contact | null> {
   const result = await sql<Contact[]>`
     INSERT INTO contacts (company_name, person_name, email)
     VALUES (${companyName}, ${personName}, ${email})
     ON CONFLICT (email) DO NOTHING
     RETURNING *
   `;
-  return result.length > 0;
+  return result.length > 0 ? result[0] : null;
 }
 
 /**
@@ -643,7 +875,8 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
     // IMPORTANT: When new tables are added to the database schema, they must be
     // added to this TRUNCATE list to ensure complete database resets.
     await sql`
-      TRUNCATE TABLE contacts, send_logs, audit_logs, email_verifier_credits
+      TRUNCATE TABLE contacts, send_logs, audit_logs, email_verifier_credits,
+                   ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events
       RESTART IDENTITY CASCADE
     `;
 
@@ -678,6 +911,407 @@ export async function closeConnection(): Promise<void> {
  * Call this during application shutdown for proper cleanup
  */
 export const closeDatabase = closeConnection;
+
+// ============================================================================
+// SES Analytics Database Operations
+// ============================================================================
+
+/**
+ * Create a new quota snapshot record
+ * Tracks periodic measurements of SES sending limits
+ * @param quota - Quota snapshot data from GetSendQuota API
+ * @returns The created snapshot record
+ */
+export async function createQuotaSnapshot(quota: QuotaSnapshot): Promise<{
+  id: number;
+  max24HourSend: number;
+  sentLast24Hours: number;
+  maxSendRate: number;
+  recordedAt: Date;
+  source: string;
+}> {
+  const [record] = await sql<
+    {
+      id: number;
+      max24HourSend: number;
+      sentLast24Hours: number;
+      maxSendRate: number;
+      recordedAt: Date;
+      source: string;
+    }[]
+  >`
+    INSERT INTO ses_quota_snapshots (max_24_hour_send, sent_last_24_hours, max_send_rate, source)
+    VALUES (${quota.max24HourSend}, ${quota.sentLast24Hours}, ${quota.maxSendRate}, ${quota.source})
+    RETURNING id, max_24_hour_send as "max24HourSend", sent_last_24_hours as "sentLast24Hours", 
+             max_send_rate as "maxSendRate", recorded_at as "recordedAt", source
+  `;
+  return record;
+}
+
+/**
+ * Get the most recent quota snapshot
+ * @returns The latest quota snapshot or null if none exists
+ */
+export async function getLatestQuotaSnapshot(): Promise<{
+  id: number;
+  max24HourSend: number;
+  sentLast24Hours: number;
+  maxSendRate: number;
+  recordedAt: Date;
+  source: string;
+} | null> {
+  const [record] = await sql<
+    {
+      id: number;
+      max24HourSend: number;
+      sentLast24Hours: number;
+      maxSendRate: number;
+      recordedAt: Date;
+      source: string;
+    }[]
+  >`
+    SELECT id, max_24_hour_send as "max24HourSend", sent_last_24_hours as "sentLast24Hours",
+           max_send_rate as "maxSendRate", recorded_at as "recordedAt", source
+    FROM ses_quota_snapshots
+    ORDER BY recorded_at DESC
+    LIMIT 1
+  `;
+  return record || null;
+}
+
+/**
+ * Create send statistics records
+ * Stores historical 15-minute data points from GetSendStatistics API
+ * Uses INSERT ... ON CONFLICT to prevent duplicates
+ * @param stats - Array of send statistics data points
+ * @returns Number of records inserted
+ */
+export async function createSendStatistics(stats: SendStatistics[]): Promise<number> {
+  let inserted = 0;
+  for (const stat of stats) {
+    const result = await sql<{ id: number }[]>`
+      INSERT INTO ses_send_statistics (timestamp, delivery_attempts, bounces, complaints, rejects)
+      VALUES (${stat.timestamp}, ${stat.deliveryAttempts}, ${stat.bounces}, ${stat.complaints}, ${stat.rejects})
+      ON CONFLICT (timestamp) DO NOTHING
+      RETURNING id
+    `;
+    if (result.length > 0) {
+      inserted++;
+    }
+  }
+  return inserted;
+}
+
+/**
+ * Get send statistics for a date range
+ * @param startDate - Start of date range (inclusive)
+ * @param endDate - End of date range (inclusive)
+ * @returns Array of send statistics data points
+ */
+export async function getSendStatistics(
+  startDate: Date,
+  endDate: Date
+): Promise<
+  {
+    id: number;
+    timestamp: Date;
+    deliveryAttempts: number;
+    bounces: number;
+    complaints: number;
+    rejects: number;
+    fetchedAt: Date;
+  }[]
+> {
+  return await sql<
+    {
+      id: number;
+      timestamp: Date;
+      deliveryAttempts: number;
+      bounces: number;
+      complaints: number;
+      rejects: number;
+      fetchedAt: Date;
+    }[]
+  >`
+    SELECT id, timestamp, delivery_attempts as "deliveryAttempts", bounces, complaints, rejects,
+           fetched_at as "fetchedAt"
+    FROM ses_send_statistics
+    WHERE timestamp >= ${startDate} AND timestamp <= ${endDate}
+    ORDER BY timestamp DESC
+  `;
+}
+
+/**
+ * Upsert identity status records
+ * Uses atomic UPSERT to handle concurrent updates
+ * @param identities - Array of identity status records
+ */
+export async function upsertIdentityStatus(identities: IdentityStatus[]): Promise<void> {
+  for (const identity of identities) {
+    await sql`
+      INSERT INTO ses_identity_status (identity, verification_status, dkim_enabled, dkim_verification_status, checked_at)
+      VALUES (${identity.identity}, ${identity.verificationStatus}, ${identity.dkimEnabled}, 
+              ${identity.dkimVerificationStatus}, ${identity.checkedAt})
+      ON CONFLICT (identity) DO UPDATE
+      SET verification_status = EXCLUDED.verification_status,
+          dkim_enabled = EXCLUDED.dkim_enabled,
+          dkim_verification_status = EXCLUDED.dkim_verification_status,
+          checked_at = EXCLUDED.checked_at
+    `;
+  }
+}
+
+/**
+ * Get all identity statuses
+ * @returns Array of all tracked identities
+ */
+export async function getIdentityStatuses(): Promise<
+  {
+    id: number;
+    identity: string;
+    verificationStatus: string;
+    dkimEnabled: boolean;
+    dkimVerificationStatus: string | null;
+    checkedAt: Date;
+  }[]
+> {
+  return await sql<
+    {
+      id: number;
+      identity: string;
+      verificationStatus: string;
+      dkimEnabled: boolean;
+      dkimVerificationStatus: string | null;
+      checkedAt: Date;
+    }[]
+  >`
+    SELECT id, identity, verification_status as "verificationStatus", dkim_enabled as "dkimEnabled",
+           dkim_verification_status as "dkimVerificationStatus", checked_at as "checkedAt"
+    FROM ses_identity_status
+    ORDER BY identity
+  `;
+}
+
+/**
+ * Convert event data to JSONValue for postgres.js
+ * Handles type conversion safely
+ */
+function serializeEventData(data: Record<string, unknown>): JSONValue {
+  return JSON.parse(JSON.stringify(data)) as JSONValue;
+}
+
+/**
+ * Create a message event record
+ * Tracks email lifecycle events internally
+ * @param event - Message event data
+ * @returns The created event record
+ */
+export async function createMessageEvent(event: MessageEvent): Promise<{
+  id: number;
+  eventType: string;
+  messageId: string | null;
+  contactId: string | null;
+  sendLogId: string | null;
+  eventData: Record<string, unknown>;
+  occurredAt: Date;
+  createdAt: Date;
+}> {
+  const serializedData = serializeEventData(event.eventData);
+  const [record] = await sql<
+    {
+      id: number;
+      eventType: string;
+      messageId: string | null;
+      contactId: string | null;
+      sendLogId: string | null;
+      eventData: Record<string, unknown>;
+      occurredAt: Date;
+      createdAt: Date;
+    }[]
+  >`
+    INSERT INTO ses_message_events (event_type, message_id, contact_id, send_log_id, event_data, occurred_at)
+    VALUES (${event.eventType}, ${event.messageId ?? null}, ${event.contactId}, ${event.sendLogId}, 
+            ${sql.json(serializedData)}, ${event.occurredAt})
+    RETURNING id, event_type as "eventType", message_id as "messageId", 
+              contact_id as "contactId", send_log_id as "sendLogId", 
+              event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+  `;
+  return record;
+}
+
+/**
+ * Options for fetching message events
+ */
+export interface GetMessageEventsOptions {
+  eventType?: AnalyticsEventType;
+  contactId?: string;
+  messageId?: string;
+  startDate?: Date;
+  endDate?: Date;
+  limit?: number;
+}
+
+/**
+ * Get message events with optional filtering
+ * Uses separate queries for each filter combination to maintain type safety with postgres.js
+ * @param options - Filter options
+ * @returns Array of matching message events
+ */
+export async function getMessageEvents(options: GetMessageEventsOptions = {}): Promise<
+  {
+    id: number;
+    eventType: string;
+    messageId: string | null;
+    contactId: string | null;
+    sendLogId: string | null;
+    eventData: Record<string, unknown>;
+    occurredAt: Date;
+    createdAt: Date;
+  }[]
+> {
+  const { eventType, contactId, messageId, startDate, endDate, limit = 100 } = options;
+
+  // Query by event type
+  if (eventType && !contactId && !messageId && !startDate && !endDate) {
+    return await sql<
+      {
+        id: number;
+        eventType: string;
+        messageId: string | null;
+        contactId: string | null;
+        sendLogId: string | null;
+        eventData: Record<string, unknown>;
+        occurredAt: Date;
+        createdAt: Date;
+      }[]
+    >`
+      SELECT id, event_type as "eventType", message_id as "messageId", 
+             contact_id as "contactId", send_log_id as "sendLogId", 
+             event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+      FROM ses_message_events
+      WHERE event_type = ${eventType}
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  // Query by contact ID
+  if (contactId && !eventType && !messageId && !startDate && !endDate) {
+    return await sql<
+      {
+        id: number;
+        eventType: string;
+        messageId: string | null;
+        contactId: string | null;
+        sendLogId: string | null;
+        eventData: Record<string, unknown>;
+        occurredAt: Date;
+        createdAt: Date;
+      }[]
+    >`
+      SELECT id, event_type as "eventType", message_id as "messageId", 
+             contact_id as "contactId", send_log_id as "sendLogId", 
+             event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+      FROM ses_message_events
+      WHERE contact_id = ${contactId}
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  // Query by message ID
+  if (messageId && !eventType && !contactId && !startDate && !endDate) {
+    return await sql<
+      {
+        id: number;
+        eventType: string;
+        messageId: string | null;
+        contactId: string | null;
+        sendLogId: string | null;
+        eventData: Record<string, unknown>;
+        occurredAt: Date;
+        createdAt: Date;
+      }[]
+    >`
+      SELECT id, event_type as "eventType", message_id as "messageId", 
+             contact_id as "contactId", send_log_id as "sendLogId", 
+             event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+      FROM ses_message_events
+      WHERE message_id = ${messageId}
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  // Query by date range
+  if (startDate && endDate && !eventType && !contactId && !messageId) {
+    return await sql<
+      {
+        id: number;
+        eventType: string;
+        messageId: string | null;
+        contactId: string | null;
+        sendLogId: string | null;
+        eventData: Record<string, unknown>;
+        occurredAt: Date;
+        createdAt: Date;
+      }[]
+    >`
+      SELECT id, event_type as "eventType", message_id as "messageId", 
+             contact_id as "contactId", send_log_id as "sendLogId", 
+             event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+      FROM ses_message_events
+      WHERE occurred_at >= ${startDate} AND occurred_at <= ${endDate}
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  // Query by event type and contact ID
+  if (eventType && contactId && !messageId && !startDate && !endDate) {
+    return await sql<
+      {
+        id: number;
+        eventType: string;
+        messageId: string | null;
+        contactId: string | null;
+        sendLogId: string | null;
+        eventData: Record<string, unknown>;
+        occurredAt: Date;
+        createdAt: Date;
+      }[]
+    >`
+      SELECT id, event_type as "eventType", message_id as "messageId", 
+             contact_id as "contactId", send_log_id as "sendLogId", 
+             event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+      FROM ses_message_events
+      WHERE event_type = ${eventType} AND contact_id = ${contactId}
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  // Default: return most recent events
+  return await sql<
+    {
+      id: number;
+      eventType: string;
+      messageId: string | null;
+      contactId: string | null;
+      sendLogId: string | null;
+      eventData: Record<string, unknown>;
+      occurredAt: Date;
+      createdAt: Date;
+    }[]
+  >`
+    SELECT id, event_type as "eventType", message_id as "messageId", 
+           contact_id as "contactId", send_log_id as "sendLogId", 
+           event_data as "eventData", occurred_at as "occurredAt", created_at as "createdAt"
+    FROM ses_message_events
+    ORDER BY occurred_at DESC
+    LIMIT ${limit}
+  `;
+}
 
 // ============================================================================
 // Standalone initialization (for CLI usage)
