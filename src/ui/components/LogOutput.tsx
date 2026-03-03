@@ -25,13 +25,13 @@ interface LogOutputProps {
 
 export function LogOutput({
   entries,
-  maxEntries = 15,
+  maxEntries = 6,
   title = '📋 Activity Log',
 }: LogOutputProps): React.ReactElement {
   const recentEntries = entries.slice(-maxEntries);
 
   return (
-    <Panel title={title} borderColor={colors.gray} height={maxEntries + 3}>
+    <Panel title={title} borderColor={colors.gray}>
       {recentEntries.length > 0 ? (
         <Box flexDirection="column">
           {recentEntries.map((entry, index) => (

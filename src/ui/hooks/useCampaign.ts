@@ -10,6 +10,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { getEligibleContactCount, getEligibleContacts } from '../../db.js';
 import { generatePreview, runCampaign } from '../../mailer.js';
+import { isShuttingDown } from '../../shutdown.js';
 import type { CampaignResult, Contact, SendProgress } from '../../types.js';
 import type { CampaignViewStatus, LiveProgress, LogEntry } from '../types.js';
 
@@ -116,6 +117,11 @@ export function useCampaign(): UseCampaignReturn {
   }, [templatePath, campaignId]);
 
   const startCampaign = useCallback(async () => {
+    // Check if shutdown was requested before starting
+    if (isShuttingDown()) {
+      return;
+    }
+
     setStatus('running');
     setLogEntries([]);
     pendingLogEntriesRef.current = []; // Clear pending queue

@@ -18,7 +18,7 @@ import { Dashboard } from './components/Dashboard.js';
  */
 export default function App(): React.ReactElement {
   return (
-    <Box flexDirection="column" padding={1} height="100%">
+    <Box flexDirection="column" height="100%">
       <Dashboard />
     </Box>
   );

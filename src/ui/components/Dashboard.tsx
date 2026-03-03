@@ -11,6 +11,7 @@
 import { Box, Text, useApp, useInput } from 'ink';
 import type React from 'react';
 import { useCallback } from 'react';
+import { shutdown } from '../../shutdown.js';
 import { useCampaign, useContacts, useNavigation } from '../hooks/index.js';
 import { colors } from '../theme.js';
 import type { DashboardView } from '../types.js';
@@ -47,6 +48,7 @@ export function Dashboard(): React.ReactElement {
   useInput((input, key) => {
     // Global quit shortcut
     if (input === 'q' || input === 'Q') {
+      shutdown(); // Signal campaign to stop first
       exit();
     }
 
@@ -139,8 +141,8 @@ export function Dashboard(): React.ReactElement {
       </Box>
 
       {/* Bottom Section - Activity Log */}
-      <Box height={10} marginTop={1}>
-        <LogOutput entries={logEntries} maxEntries={8} />
+      <Box flexShrink={0} marginTop={1}>
+        <LogOutput entries={logEntries} maxEntries={6} />
       </Box>
 
       {/* Status Bar */}
