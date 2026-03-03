@@ -38,7 +38,7 @@ export function Dashboard(): React.ReactElement {
   // Fixed element heights
   const HEADER_HEIGHT = 3; // Header with border
   const STATUS_BAR_HEIGHT = 1; // Status bar height
-  const MARGINS = 2; // Top and bottom margins
+  const MARGINS = 1; // Reduced top and bottom margins
 
   // Calculate available height for content
   const availableHeight = useMemo(
@@ -48,8 +48,8 @@ export function Dashboard(): React.ReactElement {
 
   // Calculate heights for different sections
   const sidebarHeight = availableHeight;
-  const logHeight = Math.max(4, Math.min(8, Math.floor(terminalHeight * 0.15)));
-  const mainContentHeight = Math.max(6, availableHeight - logHeight - 1);
+  const logHeight = Math.max(3, Math.min(6, Math.floor(terminalHeight * 0.10)));
+  const mainContentHeight = Math.max(6, availableHeight - logHeight);
 
   // Calculate max entries for log output based on log panel height
   // Each log entry takes 1 line, and panel has padding + title
@@ -151,7 +151,7 @@ export function Dashboard(): React.ReactElement {
       <Box
         flexGrow={1}
         flexDirection="row"
-        marginTop={1}
+        marginTop={0}
         height={mainContentHeight}
         overflow="hidden"
       >
@@ -178,7 +178,7 @@ export function Dashboard(): React.ReactElement {
       </Box>
 
       {/* Bottom Section - Activity Log */}
-      <Box flexShrink={0} marginTop={1} height={logHeight} overflow="hidden">
+      <Box flexShrink={0} marginTop={0} height={logHeight} overflow="hidden">
         <LogOutput entries={logEntries} maxEntries={logMaxEntries} maxHeight={logHeight} />
       </Box>
 
