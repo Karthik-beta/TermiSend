@@ -5,7 +5,7 @@
 
 import { insertAuditLog } from './db.js';
 import type { EventType } from './types.js';
-import { getSafeFilename, isDevelopment, redactEmail } from './utils/security.js';
+import { getSafeFilename, redactEmail } from './utils/security.js';
 
 // ============================================================================
 // Logger Interface
