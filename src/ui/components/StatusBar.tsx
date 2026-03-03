@@ -10,6 +10,7 @@
 /** @jsxImportSource react */
 import { Box, Text } from 'ink';
 import type React from 'react';
+import { isDevelopment } from '../../utils/security.js';
 import { colors } from '../theme.js';
 import type { DashboardView } from '../types.js';
 
@@ -68,6 +69,15 @@ export function StatusBar({
       <Box>
         <Text dimColor={true}>{statusMessage}</Text>
       </Box>
+
+      {/* Dev Mode Indicator */}
+      {isDevelopment() && (
+        <Box marginLeft={2}>
+          <Text dimColor={true} color={colors.warning}>
+            [DEV MODE]
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
