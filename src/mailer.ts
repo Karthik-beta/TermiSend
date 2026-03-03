@@ -648,30 +648,6 @@ async function processContact(
     return;
   }
 
-  // Apply throttle to ALL contacts, regardless of safety status
-  await reportProgress(onProgress, {
-    currentContact: current,
-    totalContacts: total,
-    email: contact.email,
-    status: 'waiting',
-    message: 'Waiting before next send...',
-  });
-
-  await throttleController.waitBeforeSend((remainingMs, totalMs) => {
-    // Update progress during wait with countdown
-    reportProgress(onProgress, {
-      currentContact: current,
-      totalContacts: total,
-      email: contact.email,
-      status: 'waiting',
-      waitTimeRemainingMs: remainingMs,
-      totalWaitTimeMs: totalMs,
-      message: `Waiting ${Math.ceil(remainingMs / 1000)}s before next send...`,
-    }).catch(() => {
-      // Silently ignore progress callback errors
-    });
-  });
-
   // Skip if email is not safe
   if (!isEmailSafe(verificationOutcome.verificationResult)) {
     await handleUnsafeEmail(
@@ -739,6 +715,11 @@ async function processContact(
 
   const sendResult = await sendEmail(emailParams, throttleController);
 
+  // CRITICAL FIX: Check shutdown before updating database
+  if (isShuttingDown()) {
+    throw new Error('Shutdown requested after send but before log update');
+  }
+
   if (sendResult.success) {
     await handleSuccessfulSend(
       contact,
@@ -773,6 +754,30 @@ async function processContact(
       message: `Failed to send to ${contact.email}: ${sendResult.error || 'Unknown error'}`,
     });
   }
+
+  // CRITICAL FIX: Apply throttle AFTER send to control rate to NEXT email
+  await reportProgress(onProgress, {
+    currentContact: current,
+    totalContacts: total,
+    email: contact.email,
+    status: 'waiting',
+    message: 'Waiting before next send...',
+  });
+
+  await throttleController.waitBeforeSend((remainingMs, totalMs) => {
+    // Update progress during wait with countdown
+    reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'waiting',
+      waitTimeRemainingMs: remainingMs,
+      totalWaitTimeMs: totalMs,
+      message: `Waiting ${Math.ceil(remainingMs / 1000)}s before next send...`,
+    }).catch(() => {
+      // Silently ignore progress callback errors
+    });
+  });
 }
 
 /**
