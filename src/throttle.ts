@@ -15,6 +15,7 @@ import {
 } from './events/index.js';
 import { logger } from './logger.js';
 import { getAccountInfo } from './ses-quota.js';
+import { isShuttingDown, throwIfShuttingDown } from './shutdown.js';
 import type { DelayResult, QuotaStatus, RateLimiter, ThrottleConfig } from './types.js';
 
 // ============================================================================
@@ -102,13 +103,24 @@ export function calculateDelay(config: ThrottleConfig): DelayResult {
 
 /**
  * Async wrapper around setTimeout for delay operations
+ * Supports optional AbortSignal for cancellation during shutdown
  *
  * @param ms - Milliseconds to delay
- * @returns Promise that resolves after the specified delay
+ * @param signal - Optional AbortSignal to cancel the delay
+ * @returns Promise that resolves after the specified delay or rejects if aborted
  */
-export function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      resolve();
+    }, ms);
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        clearTimeout(timeout);
+        reject(new Error('Delay aborted'));
+      });
+    }
   });
 }
 
@@ -541,6 +553,9 @@ export class EmailThrottleController {
     onProgress?: (remainingMs: number, totalMs: number) => void,
     contactId?: string
   ): Promise<DelayResult> {
+    // Check for shutdown before starting
+    throwIfShuttingDown();
+
     // Get fresh config
     this.config = getThrottleConfig();
 
@@ -581,6 +596,11 @@ export class EmailThrottleController {
       const progressIntervalMs = 1000;
 
       while (Date.now() < endTime) {
+        // Check for shutdown on each iteration
+        if (isShuttingDown()) {
+          throw new Error('Shutdown requested during throttle delay');
+        }
+
         const remainingMs = Math.max(0, endTime - Date.now());
         onProgress(remainingMs, totalMs);
 
@@ -594,8 +614,10 @@ export class EmailThrottleController {
       // Final call with 0 remaining
       onProgress(0, totalMs);
     } else {
-      // Execute the delay without progress updates
+      // Execute the delay without progress updates - check shutdown before and after
+      throwIfShuttingDown();
       await delay(delayResult.totalDelayMs);
+      throwIfShuttingDown();
     }
 
     // Emit THROTTLE_DELAY_COMPLETED event (fire-and-forget)

@@ -35,6 +35,7 @@ import { logger } from './logger.js';
 import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
 import { analyticsEvents } from './ses-analytics.js';
+import { isShuttingDown } from './shutdown.js';
 import { EmailThrottleController, getEmailThrottleController } from './throttle.js';
 // Type imports
 import type {
@@ -690,6 +691,25 @@ async function processContact(
     });
   });
 
+  // Skip if email is not safe
+  if (!isEmailSafe(verificationOutcome.verificationResult)) {
+    await handleUnsafeEmail(
+      contact,
+      verificationOutcome.verificationResult,
+      result,
+      sendLogId,
+      campaignId
+    );
+    await reportProgress(onProgress, {
+      currentContact: current,
+      totalContacts: total,
+      email: contact.email,
+      status: 'skipped',
+      message: `Skipped ${contact.email} - unsafe email`,
+    });
+    return;
+  }
+
   if (dryRun) {
     await handleDryRun(contact, result, sendLogId, subject, campaignId);
     await reportProgress(onProgress, {
@@ -846,6 +866,12 @@ async function executeCampaignLoop(
   let isPolling = true;
 
   while (isPolling) {
+    // Check for shutdown before each iteration
+    if (isShuttingDown()) {
+      isPolling = false;
+      break;
+    }
+
     const contacts = await getEligibleContacts(campaignId);
 
     if (contacts.length === 0) {
@@ -902,7 +928,18 @@ async function waitForLeads(result: CampaignResult, onProgress?: ProgressCallbac
     status: 'waiting',
     message: 'Waiting for new leads to be appended...',
   });
-  await new Promise((resolve) => setTimeout(resolve, 30000));
+
+  // Use short intervals to allow checking shutdown state
+  const totalWaitMs = 30000;
+  const checkIntervalMs = 100;
+  const iterations = totalWaitMs / checkIntervalMs;
+
+  for (let i = 0; i < iterations; i++) {
+    if (isShuttingDown()) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
+  }
 }
 
 async function updateResultTotal(campaignId: string, result: CampaignResult) {
@@ -922,6 +959,11 @@ async function processBatch(
 ) {
   const mode: SendMode = dryRun ? 'dry_run' : 'production';
   for (const contact of contacts) {
+    // Check for shutdown before processing each contact
+    if (isShuttingDown()) {
+      break;
+    }
+
     try {
       await processContact(
         contact,
@@ -935,6 +977,10 @@ async function processBatch(
         result.totalContacts
       );
     } catch (error) {
+      // Don't treat shutdown errors as failures
+      if (error instanceof Error && error.message === 'Shutdown requested') {
+        break;
+      }
       await handleBatchError(contact, error, result, campaignId, mode, templateContent, onProgress);
     }
   }

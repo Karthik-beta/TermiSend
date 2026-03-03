@@ -7,6 +7,7 @@
 import { render } from 'ink';
 import { closeConnection, initializeSchema } from './db.js';
 import { domainEvents, registerAllAnalyticsHandlers } from './events/index.js';
+import { shutdown } from './shutdown.js';
 import App from './ui/index.js';
 
 // ============================================================================
@@ -45,46 +46,34 @@ async function main(): Promise<void> {
 // ============================================================================
 
 // Handle graceful shutdown
-// Use exitCode instead of process.exit() to allow async cleanup to complete
 let isShuttingDown = false;
 
-process.on('SIGINT', () => {
+function handleShutdown(): void {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
 
-  closeConnection()
-    .then(() => {
-      process.exitCode = 0;
-    })
-    .catch((error) => {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('❌ Error during shutdown');
-      console.error(`   Error: ${errorMessage}`);
-      console.error('   Note: Data has been preserved');
-      process.exitCode = 1;
-    });
-});
+  // Set global shutdown flag to stop all loops
+  shutdown();
 
-process.on('SIGTERM', () => {
-  if (isShuttingDown) {
-    return;
-  }
-  isShuttingDown = true;
+  // Force exit after brief grace period (don't wait indefinitely)
+  setTimeout(() => {
+    process.exit(0);
+  }, 500);
 
-  closeConnection()
-    .then(() => {
-      process.exitCode = 0;
-    })
-    .catch((error) => {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('❌ Error during shutdown');
-      console.error(`   Error: ${errorMessage}`);
-      console.error('   Note: Data has been preserved');
-      process.exitCode = 1;
-    });
-});
+  // Attempt graceful cleanup
+  closeConnection().catch((error) => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('❌ Error during shutdown');
+    console.error(`   Error: ${errorMessage}`);
+    console.error('   Note: Data has been preserved');
+    process.exitCode = 1;
+  });
+}
+
+process.on('SIGINT', () => handleShutdown());
+process.on('SIGTERM', () => handleShutdown());
 
 // Start the application
 main();

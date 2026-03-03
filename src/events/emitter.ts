@@ -11,6 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { logger } from '../logger.js';
+import { isShuttingDown } from '../shutdown.js';
 import { saveEvent } from './repository.js';
 import type {
   DomainEvent,
@@ -189,6 +190,11 @@ export class DomainEventEmitter {
    * @param event - Domain event to persist
    */
   private async persistEvent(event: DomainEvent): Promise<void> {
+    // Skip persistence during shutdown to avoid database errors
+    if (isShuttingDown()) {
+      return;
+    }
+
     // Use the repository to save the event
     // Errors are handled internally by saveEvent - won't throw
     await saveEvent(event);

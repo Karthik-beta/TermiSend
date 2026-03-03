@@ -18,6 +18,7 @@ import {
 } from './events/index.js';
 import { logger } from './logger.js';
 import { getSesClient, verifySesConfiguration } from './ses-quota.js';
+import { isShuttingDown } from './shutdown.js';
 import type { EmailThrottleController } from './throttle.js';
 import { delay, getEmailThrottleController } from './throttle.js';
 import type { EmailSendParams, EmailSendResult } from './types.js';
@@ -143,6 +144,11 @@ async function sendWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
+    // Check for shutdown before each retry attempt
+    if (isShuttingDown()) {
+      return { success: false, error: 'Shutdown requested' };
+    }
+
     const canSend = await controller.checkQuota();
     if (!canSend) {
       return { success: false, error: 'SES quota exhaustion' };
@@ -204,6 +210,11 @@ async function sendWithRetry(
       }
 
       if (isThrottlingError(error) && attempt < MAX_SEND_RETRIES) {
+        // Check for shutdown before retry delay
+        if (isShuttingDown()) {
+          return { success: false, error: 'Shutdown requested' };
+        }
+
         const rawBackoffMs = RETRY_BASE_DELAY_MS * 2 ** attempt;
         const backoffMs = Math.min(rawBackoffMs, MAX_BACKOFF_DELAY_MS);
         await logger.warn(`Throttling, retrying in ${backoffMs}ms: ${lastError.message}`);
