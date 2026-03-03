@@ -8,9 +8,9 @@
  */
 
 /** @jsxImportSource react */
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type React from 'react';
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { shutdown } from '../../shutdown.js';
 import { useCampaign, useContacts, useNavigation } from '../hooks/index.js';
 import { colors } from '../theme.js';
@@ -29,6 +29,35 @@ import { StatusBar } from './StatusBar.js';
  */
 export function Dashboard(): React.ReactElement {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+
+  // Get terminal dimensions and calculate responsive layout
+  const terminalHeight = stdout.rows;
+  const terminalWidth = stdout.columns;
+
+  // Fixed element heights
+  const HEADER_HEIGHT = 3; // Header with border
+  const STATUS_BAR_HEIGHT = 1; // Status bar height
+  const MARGINS = 2; // Top and bottom margins
+
+  // Calculate available height for content
+  const availableHeight = useMemo(
+    () => Math.max(10, terminalHeight - HEADER_HEIGHT - STATUS_BAR_HEIGHT - MARGINS),
+    [terminalHeight]
+  );
+
+  // Calculate heights for different sections
+  const sidebarHeight = availableHeight;
+  const logHeight = Math.max(4, Math.min(8, Math.floor(terminalHeight * 0.15)));
+  const mainContentHeight = Math.max(6, availableHeight - logHeight - 1);
+
+  // Calculate max entries for log output based on log panel height
+  // Each log entry takes 1 line, and panel has padding + title
+  const logMaxEntries = Math.max(2, logHeight - 2);
+
+  // Calculate max contacts to display based on available height
+  // Header stats take ~3 lines, each contact takes 2 lines, plus some padding
+  const contactMaxDisplay = Math.max(3, Math.floor((mainContentHeight - 4) / 2));
 
   // Navigation state
   const { currentView, navigateTo, handleMenuSelect, goToMenu } = useNavigation(exit);
@@ -76,11 +105,11 @@ export function Dashboard(): React.ReactElement {
   }, [refreshContacts]);
 
   // Render main content based on current view
-  const renderMainContent = (view: DashboardView): React.ReactElement => {
+  const renderMainContent = (view: DashboardView, contentHeight: number): React.ReactElement => {
     switch (view) {
       case 'MENU':
         return (
-          <Panel title="Welcome" borderColor={colors.primary} flexGrow={1}>
+          <Panel title="Welcome" borderColor={colors.primary} flexGrow={1} minHeight={contentHeight - 2}>
             <Box flexDirection="column" gap={1}>
               <Text>
                 Welcome to <Text bold={true}>TermiSend</Text> - Email Outreach Dashboard
@@ -119,30 +148,38 @@ export function Dashboard(): React.ReactElement {
       <Header isConnected={true} />
 
       {/* Main Content Area */}
-      <Box flexGrow={1} flexDirection="row" marginTop={1}>
+      <Box
+        flexGrow={1}
+        flexDirection="row"
+        marginTop={1}
+        height={mainContentHeight}
+        overflow="hidden"
+      >
         {/* Left Sidebar - Menu */}
-        <Box width="20%" flexDirection="column">
+        <Box width="20%" flexDirection="column" height={sidebarHeight}>
           <Menu onSelect={handleMenuSelect} />
         </Box>
 
         {/* Main Content */}
-        <Box width="50%" flexDirection="column" paddingX={1}>
-          {renderMainContent(currentView)}
+        <Box width="50%" flexDirection="column" paddingX={1} height={sidebarHeight}>
+          {renderMainContent(currentView, mainContentHeight)}
         </Box>
 
         {/* Right Sidebar - Contacts */}
-        <Box width="30%" flexDirection="column">
+        <Box width="30%" flexDirection="column" height={sidebarHeight}>
           <ContactList
             contacts={contacts}
             pendingCount={pendingCount}
             isLoading={contactsLoading}
+            maxDisplay={contactMaxDisplay}
+            maxHeight={sidebarHeight}
           />
         </Box>
       </Box>
 
       {/* Bottom Section - Activity Log */}
-      <Box flexShrink={0} marginTop={1}>
-        <LogOutput entries={logEntries} maxEntries={6} />
+      <Box flexShrink={0} marginTop={1} height={logHeight} overflow="hidden">
+        <LogOutput entries={logEntries} maxEntries={logMaxEntries} maxHeight={logHeight} />
       </Box>
 
       {/* Status Bar */}

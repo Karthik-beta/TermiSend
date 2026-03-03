@@ -23,6 +23,8 @@ interface ContactListProps {
   isLoading?: boolean;
   /** Maximum number of contacts to show */
   maxDisplay?: number;
+  /** Maximum height for the contact list */
+  maxHeight?: number;
 }
 
 export function ContactList({
@@ -30,20 +32,21 @@ export function ContactList({
   pendingCount,
   isLoading = false,
   maxDisplay = 10,
+  maxHeight,
 }: ContactListProps): React.ReactElement {
   const displayedContacts = contacts.slice(0, maxDisplay);
   const remainingCount = Math.max(0, contacts.length - maxDisplay);
 
   if (isLoading) {
     return (
-      <Panel title="📇 Contacts" borderColor={colors.secondary} flexGrow={1}>
+      <Panel title="📇 Contacts" borderColor={colors.secondary} flexGrow={1} height={maxHeight}>
         <Text dimColor={true}>Loading contacts...</Text>
       </Panel>
     );
   }
 
   return (
-    <Panel title="📇 Contacts" borderColor={colors.secondary} flexGrow={1}>
+    <Panel title="📇 Contacts" borderColor={colors.secondary} flexGrow={1} height={maxHeight}>
       {/* Stats Summary */}
       <Box marginBottom={1} flexDirection="column">
         <Box>

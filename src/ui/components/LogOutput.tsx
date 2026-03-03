@@ -21,17 +21,20 @@ interface LogOutputProps {
   maxEntries?: number;
   /** Panel title */
   title?: string;
+  /** Maximum height for the log output */
+  maxHeight?: number;
 }
 
 export function LogOutput({
   entries,
   maxEntries = 6,
   title = '📋 Activity Log',
+  maxHeight,
 }: LogOutputProps): React.ReactElement {
   const recentEntries = entries.slice(-maxEntries);
 
   return (
-    <Panel title={title} borderColor={colors.gray}>
+    <Panel title={title} borderColor={colors.gray} height={maxHeight} flexGrow={1} flexShrink={0}>
       {recentEntries.length > 0 ? (
         <Box flexDirection="column">
           {recentEntries.map((entry, index) => (
