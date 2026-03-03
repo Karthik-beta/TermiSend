@@ -24,21 +24,8 @@ interface CampaignFormProps {
 }
 
 export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.ReactElement {
-  const {
-    status,
-    templatePath,
-    pendingCount,
-    result,
-    error,
-    preview,
-    liveProgress,
-    logEntries,
-    setTemplatePath,
-    loadPendingCount,
-    generateCampaignPreview,
-    confirmCampaign,
-    reset,
-  } = useCampaign();
+  const campaign = useCampaign();
+  const { status, loadPendingCount, confirmCampaign, reset } = campaign;
 
   // Load pending count on mount
   useEffect(() => {
@@ -73,113 +60,178 @@ export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.R
     }
   }, [status, onCampaignComplete]);
 
-  // Render running state with progress
-  if (status === 'running') {
-    return (
-      <Box flexDirection="column" gap={1}>
-        <CampaignStatus progress={liveProgress} isRunning={true} />
-        <Panel title="📋 Campaign Log" borderColor={colors.gray}>
-          {logEntries.slice(-5).map((entry, index) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static log display
-            <Box key={`log-${index}`}>
-              <Text>
-                {entry.email} - {entry.status}
-              </Text>
-            </Box>
-          ))}
-        </Panel>
+  return renderMainContent(campaign);
+}
+
+function renderMainContent(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const { status } = campaign;
+
+  switch (status) {
+    case 'running':
+      return renderRunningState(campaign);
+    case 'success':
+      return renderSuccessState(campaign);
+    case 'error':
+      return renderErrorState(campaign);
+    case 'confirm':
+      return renderConfirmState(campaign);
+    default:
+      return renderInputForm(campaign);
+  }
+}
+
+function renderRunningState(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const { campaignId, isContinuous, liveProgress, logEntries } = campaign;
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text dimColor={true}>Campaign: {campaignId.slice(0, 8)}...</Text>
+        <Text color={colors.success}>{isContinuous ? '● Continuous Mode' : ''}</Text>
       </Box>
-    );
+      <CampaignStatus progress={liveProgress} isRunning={true} />
+      <Panel title="📋 Campaign Log" borderColor={colors.gray}>
+        {logEntries.slice(-5).map((entry, index) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static log display
+          <Box key={`log-${index}`}>
+            <Text>
+              {entry.email} - {entry.status}
+            </Text>
+          </Box>
+        ))}
+      </Panel>
+    </Box>
+  );
+}
+
+function renderSuccessState(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const { campaignId, result } = campaign;
+  if (!result) {
+    return <Text>No result</Text>;
   }
 
-  // Render success state
-  if (status === 'success' && result) {
-    return (
-      <Panel title={`${icons.success} Campaign Complete`} borderColor={colors.success}>
-        <Box flexDirection="column" gap={spacing.xs}>
+  return (
+    <Panel title={`${icons.success} Campaign Complete`} borderColor={colors.success}>
+      <Box flexDirection="column" gap={spacing.xs}>
+        <Box>
+          <Text dimColor={true}>Campaign ID: {campaignId}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text>Total Contacts: </Text>
+          <Text bold={true}>{result.totalContacts}</Text>
+        </Box>
+        <Box>
+          <Text>Emails Sent: </Text>
+          <SuccessText>{result.sentCount}</SuccessText>
+        </Box>
+        <Box>
+          <Text>Skipped (Invalid): </Text>
+          <WarningText>{result.skippedCount}</WarningText>
+        </Box>
+        <Box>
+          <Text>Failed: </Text>
+          <Text color={result.failedCount > 0 ? colors.error : colors.success}>
+            {result.failedCount}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor={true}>Press Escape to go back</Text>
+        </Box>
+      </Box>
+    </Panel>
+  );
+}
+
+function renderErrorState(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const { campaignId, error } = campaign;
+  return (
+    <Panel title={`${icons.error} Campaign Failed`} borderColor={colors.error}>
+      <Box flexDirection="column" gap={spacing.xs}>
+        <Box>
+          <Text dimColor={true}>Campaign ID: {campaignId}</Text>
+        </Box>
+        <ErrorText>{error}</ErrorText>
+        <Box marginTop={1}>
+          <Text dimColor={true}>Press Escape to go back</Text>
+        </Box>
+      </Box>
+    </Panel>
+  );
+}
+
+function renderConfirmState(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const { campaignId, pendingCount, isContinuous, templatePath, preview } = campaign;
+  if (!preview) {
+    return <Text>No preview</Text>;
+  }
+
+  return (
+    <Panel title="📤 Campaign Preview" borderColor={colors.warning}>
+      <Box flexDirection="column" gap={spacing.xs}>
+        <Box>
+          <Text>Campaign ID: </Text>
+          <Text bold={true} color={colors.primary}>
+            {campaignId.slice(0, 8)}...
+          </Text>
+        </Box>
+        <Box>
+          <Text>Pending Contacts: </Text>
+          <Text bold={true} color={pendingCount > 0 ? colors.success : colors.error}>
+            {pendingCount}
+          </Text>
+        </Box>
+        <Box>
+          <Text>Continuous Mode: </Text>
+          <Text bold={true} color={isContinuous ? colors.success : colors.gray}>
+            {isContinuous ? 'YES (Automatic polling enabled)' : 'NO (Run once)'}
+          </Text>
+        </Box>
+        <Box>
+          <Text>Template: </Text>
+          <Text dimColor={true}>{templatePath}</Text>
+        </Box>
+
+        <Box marginTop={1} borderStyle="single" padding={1}>
           <Box>
-            <Text>Total Contacts: </Text>
-            <Text bold={true}>{result.totalContacts}</Text>
-          </Box>
-          <Box>
-            <Text>Emails Sent: </Text>
-            <SuccessText>{result.sentCount}</SuccessText>
-          </Box>
-          <Box>
-            <Text>Skipped (Invalid): </Text>
-            <WarningText>{result.skippedCount}</WarningText>
-          </Box>
-          <Box>
-            <Text>Failed: </Text>
-            <Text color={result.failedCount > 0 ? colors.error : colors.success}>
-              {result.failedCount}
-            </Text>
+            <Text bold={true}>Subject: {preview.subject}</Text>
           </Box>
           <Box marginTop={1}>
-            <Text dimColor={true}>Press Escape to go back</Text>
-          </Box>
-        </Box>
-      </Panel>
-    );
-  }
-
-  // Render error state
-  if (status === 'error') {
-    return (
-      <Panel title={`${icons.error} Campaign Failed`} borderColor={colors.error}>
-        <Box flexDirection="column" gap={spacing.xs}>
-          <ErrorText>{error}</ErrorText>
-          <Box marginTop={1}>
-            <Text dimColor={true}>Press Escape to go back</Text>
-          </Box>
-        </Box>
-      </Panel>
-    );
-  }
-
-  // Render confirmation state
-  if (status === 'confirm' && preview) {
-    return (
-      <Panel title="📤 Campaign Preview" borderColor={colors.warning}>
-        <Box flexDirection="column" gap={spacing.xs}>
-          <Box>
-            <Text>Pending Contacts: </Text>
-            <Text bold={true} color={pendingCount > 0 ? colors.success : colors.error}>
-              {pendingCount}
-            </Text>
-          </Box>
-          <Box>
-            <Text>Template: </Text>
-            <Text dimColor={true}>{templatePath}</Text>
-          </Box>
-
-          <Box marginTop={1} borderStyle="single" padding={1}>
-            <Box>
-              <Text bold={true}>Subject: {preview.subject}</Text>
-            </Box>
-            <Box marginTop={1}>
-              <Text dimColor={true} wrap="truncate-end">
-                {preview.textBody.slice(0, 200)}...
-              </Text>
-            </Box>
-          </Box>
-
-          <Box marginTop={2}>
-            <Text bold={true} color={colors.warning}>
-              Start campaign? (y/n)
+            <Text dimColor={true} wrap="truncate-end">
+              {preview.textBody.slice(0, 200)}...
             </Text>
           </Box>
         </Box>
-      </Panel>
-    );
-  }
 
-  // Render input form
+        <Box marginTop={2}>
+          <Text bold={true} color={colors.warning}>
+            Start campaign? (y/n)
+          </Text>
+        </Box>
+      </Box>
+    </Panel>
+  );
+}
+
+function renderInputForm(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
+  const {
+    campaignId,
+    pendingCount,
+    templatePath,
+    setTemplatePath,
+    generateCampaignPreview,
+    isContinuous,
+    status,
+  } = campaign;
+
   return (
     <Panel title="📤 Send Email Campaign" borderColor={colors.primary}>
       <Box flexDirection="column" gap={spacing.xs}>
-        {/* Pending Count */}
+        {/* Campaign Info */}
         <Box>
+          <Text dimColor={true}>New Campaign ID: {campaignId.slice(0, 8)}...</Text>
+        </Box>
+
+        {/* Pending Count */}
+        <Box marginTop={1}>
           <Text>Pending Contacts: </Text>
           <Text bold={true} color={pendingCount > 0 ? colors.success : colors.warning}>
             {pendingCount}
@@ -199,6 +251,14 @@ export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.R
             }}
             placeholder="./template.md"
           />
+        </Box>
+
+        {/* Continuous mode hint */}
+        <Box marginTop={1}>
+          <Text dimColor={true}>
+            Continuous mode is {isContinuous ? 'ENABLED' : 'DISABLED'}.
+            {isContinuous ? ' New leads will be picked up automatically.' : ''}
+          </Text>
         </Box>
 
         {/* Loading indicator */}

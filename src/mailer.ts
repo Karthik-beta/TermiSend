@@ -4,16 +4,25 @@
  */
 
 // Node built-ins
+import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 // External libraries
 import { marked } from 'marked';
 
 // Local modules (alphabetical)
-import { createSendLog, getEligibleContacts, updateSendLog } from './db.js';
+import {
+  createSendLog,
+  getEligibleContactCount,
+  getEligibleContacts,
+  updateSendLog,
+} from './db.js';
 import {
   type CampaignCompletedPayload,
   type CampaignStartedPayload,
+  type ContactDeemedUnsafePayload,
+  type ContactInvalidPayload,
+  type ContactVerifiedPayload,
   createEvent,
   DomainEventType,
   domainEvents,
@@ -281,6 +290,46 @@ async function verifyContactEmail(
 ): Promise<VerificationOutcome> {
   try {
     const verificationResult = await verifyEmail(contact.email);
+
+    // Emit verification events for analytics
+    if (verificationResult.status === 'invalid') {
+      try {
+        const event = createEvent<ContactInvalidPayload>(DomainEventType.CONTACT_INVALID, {
+          contactId: contact.id,
+          email: contact.email,
+          reason: verificationResult.message || 'Email status: invalid',
+        });
+        domainEvents.emit(event);
+      } catch {
+        /* ignore */
+      }
+    } else if (isEmailSafe(verificationResult)) {
+      try {
+        const event = createEvent<ContactVerifiedPayload>(DomainEventType.CONTACT_VERIFIED, {
+          contactId: contact.id,
+          email: contact.email,
+          result: 'valid',
+        });
+        domainEvents.emit(event);
+      } catch {
+        /* ignore */
+      }
+    } else {
+      try {
+        const event = createEvent<ContactDeemedUnsafePayload>(
+          DomainEventType.CONTACT_DEEMED_UNSAFE,
+          {
+            contactId: contact.id,
+            email: contact.email,
+            reason: `Unsafe email: ${verificationResult.status} (${verificationResult.risk} risk)`,
+          }
+        );
+        domainEvents.emit(event);
+      } catch {
+        /* ignore */
+      }
+    }
+
     return { shouldContinue: true, verificationResult };
   } catch (verifyError) {
     const errorMsg = verifyError instanceof Error ? verifyError.message : String(verifyError);
@@ -308,7 +357,8 @@ async function handleUnsafeEmail(
   contact: Contact,
   verificationResult: EmailVerificationResponse,
   result: CampaignResult,
-  sendLogId: string
+  sendLogId: string,
+  campaignId?: string
 ): Promise<void> {
   result.skippedCount++;
   result.details.push({
@@ -330,6 +380,7 @@ async function handleUnsafeEmail(
     const event = createEvent<EmailSkippedPayload>(DomainEventType.EMAIL_SKIPPED, {
       contactId: contact.id,
       sendLogId,
+      campaignId,
       reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
       skipCategory: 'unsafe_email',
     });
@@ -347,7 +398,8 @@ async function handleDryRun(
   contact: Contact,
   result: CampaignResult,
   sendLogId: string,
-  subject: string
+  subject: string,
+  campaignId?: string
 ): Promise<void> {
   result.sentCount++;
   result.details.push({
@@ -364,6 +416,20 @@ async function handleDryRun(
     subject,
     mode: 'dry_run',
   });
+  // Emit EMAIL_SENT event (fire-and-forget) for dry run analytics
+  try {
+    const event = createEvent<EmailSentPayload>(DomainEventType.EMAIL_SENT, {
+      contactId: contact.id,
+      sendLogId,
+      campaignId,
+      messageId: 'dry_run',
+      subject,
+      mode: 'dry_run',
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
@@ -377,7 +443,8 @@ async function handleSuccessfulSend(
   result: CampaignResult,
   sendLogId: string,
   subject: string,
-  mode: SendMode
+  mode: SendMode,
+  campaignId?: string
 ): Promise<void> {
   result.sentCount++;
   result.details.push({
@@ -409,6 +476,7 @@ async function handleSuccessfulSend(
     const event = createEvent<EmailSentPayload>(DomainEventType.EMAIL_SENT, {
       contactId: contact.id,
       sendLogId,
+      campaignId,
       messageId,
       subject,
       mode,
@@ -429,7 +497,8 @@ async function handleFailedSend(
   errorReason: string,
   result: CampaignResult,
   sendLogId: string,
-  subject: string
+  subject: string,
+  campaignId?: string
 ): Promise<void> {
   result.failedCount++;
   result.details.push({
@@ -459,6 +528,7 @@ async function handleFailedSend(
     const event = createEvent<EmailFailedPayload>(DomainEventType.EMAIL_FAILED, {
       contactId: contact.id,
       sendLogId,
+      campaignId,
       errorReason,
       errorCategory: 'ses_error',
     });
@@ -476,7 +546,8 @@ async function handleContactError(
   contact: Contact,
   error: unknown,
   result: CampaignResult,
-  sendLogId: string
+  sendLogId: string,
+  campaignId?: string
 ): Promise<void> {
   const errorMsg = error instanceof Error ? error.message : String(error);
   result.failedCount++;
@@ -494,6 +565,19 @@ async function handleContactError(
     status: 'failed',
     errorReason: errorMsg,
   });
+  // Emit EMAIL_FAILED domain event (fire-and-forget)
+  try {
+    const event = createEvent<EmailFailedPayload>(DomainEventType.EMAIL_FAILED, {
+      contactId: contact.id,
+      sendLogId,
+      campaignId,
+      errorReason: errorMsg,
+      errorCategory: 'other',
+    });
+    domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
@@ -522,6 +606,7 @@ async function processContact(
   throttleController: EmailThrottleController,
   dryRun: boolean,
   result: CampaignResult,
+  campaignId?: string,
   onProgress?: ProgressCallback,
   currentContactIndex?: number,
   totalContacts?: number
@@ -538,7 +623,7 @@ async function processContact(
   const mode: SendMode = dryRun ? 'dry_run' : 'production';
 
   // Create send log entry before any processing
-  const sendLog = await createSendLog(contact.id, mode, subject, bodyPreview);
+  const sendLog = await createSendLog(contact.id, mode, subject, bodyPreview, campaignId);
   const sendLogId = sendLog.id;
 
   // Verify email FIRST - before any waiting or processing
@@ -564,7 +649,13 @@ async function processContact(
 
   // Skip if email is not safe - no waiting for rejected contacts
   if (!isEmailSafe(verificationOutcome.verificationResult)) {
-    await handleUnsafeEmail(contact, verificationOutcome.verificationResult, result, sendLogId);
+    await handleUnsafeEmail(
+      contact,
+      verificationOutcome.verificationResult,
+      result,
+      sendLogId,
+      campaignId
+    );
     await reportProgress(onProgress, {
       currentContact: current,
       totalContacts: total,
@@ -600,7 +691,7 @@ async function processContact(
   });
 
   if (dryRun) {
-    await handleDryRun(contact, result, sendLogId, subject);
+    await handleDryRun(contact, result, sendLogId, subject, campaignId);
     await reportProgress(onProgress, {
       currentContact: current,
       totalContacts: total,
@@ -636,6 +727,7 @@ async function processContact(
     const event = createEvent<EmailSendRequestedPayload>(DomainEventType.EMAIL_SEND_REQUESTED, {
       contactId: contact.id,
       sendLogId,
+      campaignId,
       subject,
       mode,
     });
@@ -653,7 +745,8 @@ async function processContact(
       result,
       sendLogId,
       subject,
-      mode
+      mode,
+      campaignId
     );
     await reportProgress(onProgress, {
       currentContact: current,
@@ -668,7 +761,8 @@ async function processContact(
       sendResult.error || 'Unknown error',
       result,
       sendLogId,
-      subject
+      subject,
+      campaignId
     );
     await reportProgress(onProgress, {
       currentContact: current,
@@ -686,12 +780,16 @@ async function processContact(
  * @param templatePath - Path to markdown template file
  * @param dryRun - If true, don't actually send emails (for testing)
  * @param onProgress - Optional callback for real-time progress updates
+ * @param campaignId - Optional campaign ID to filter by
+ * @param continuous - If true, keep polling for new contacts after finishing initial batch
  * @returns Campaign result summary
  */
 export async function runCampaign(
   templatePath: string,
   dryRun: boolean = false,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  campaignId?: string,
+  continuous: boolean = false
 ): Promise<CampaignResult> {
   const result: CampaignResult = {
     totalContacts: 0,
@@ -701,117 +799,183 @@ export async function runCampaign(
     details: [],
   };
 
-  // Validate template path for security
+  // Validate template path
   const pathValidation = validateTemplatePath(templatePath);
   if (!pathValidation.valid) {
     throw new Error(`Invalid template path: ${pathValidation.error}`);
   }
   const sanitizedTemplatePath = pathValidation.sanitizedPath;
-
-  // Get shared throttle controller singleton
-  const throttleController = getEmailThrottleController();
-
-  // Get eligible contacts (those without a successful send log)
-  const contacts = await getEligibleContacts();
-  result.totalContacts = contacts.length;
-
-  if (contacts.length === 0) {
-    return result;
-  }
-
-  // Preliminary quota check before starting campaign
-  const canStartCampaign = await throttleController.checkQuota();
-  if (!canStartCampaign) {
-    // Log quota exhaustion error - no need to mark contacts as failed
-    // since we're using send_logs now and they can be retried
-    result.failedCount = contacts.length;
-    for (const contact of contacts) {
-      result.details.push({
-        email: contact.email,
-        status: 'failed',
-        reason: 'SES quota near exhaustion. Campaign aborted.',
-      });
-    }
-    await logger.logError('Campaign Aborted', 'SES quota near exhaustion', {
-      attemptedContacts: contacts.length,
-    });
-    return result;
-  }
+  const actualCampaignId = campaignId || crypto.randomUUID();
 
   try {
-    // Read template file
     const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
-
-    // Determine mode
+    const throttleController = getEmailThrottleController();
     const mode: SendMode = dryRun ? 'dry_run' : 'production';
 
-    // Emit CAMPAIGN_STARTED event (fire-and-forget)
-    const campaignStartTime = Date.now();
-    try {
-      const event = createEvent<CampaignStartedPayload>(DomainEventType.CAMPAIGN_STARTED, {
-        totalContacts: contacts.length,
-        mode,
-        templatePath: sanitizedTemplatePath,
-      });
-      domainEvents.emit(event);
-    } catch {
-      // Silently ignore event emission errors
-    }
+    await emitCampaignStarted(actualCampaignId, mode, sanitizedTemplatePath);
 
-    // Process each contact
-    for (let i = 0; i < contacts.length; i++) {
-      const contact = contacts[i];
-      try {
-        await processContact(
-          contact,
-          templateContent,
-          throttleController,
-          dryRun,
-          result,
-          onProgress,
-          i + 1, // current contact index (1-based for display)
-          contacts.length // total contacts
-        );
-      } catch (error) {
-        // Create a send log for the error case since processContact might have failed
-        // before creating one (e.g., during template processing)
-        const { subject, body } = extractSubject(processTemplate(templateContent, contact));
-        const bodyPreview = body.substring(0, 500);
-        const errorLog = await createSendLog(contact.id, mode, subject, bodyPreview);
-        await handleContactError(contact, error, result, errorLog.id);
-        // Report the error via progress callback
-        await reportProgress(onProgress, {
-          currentContact: i + 1,
-          totalContacts: contacts.length,
-          email: contact.email,
-          status: 'failed',
-          message: `Error processing ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
-    }
-
-    // Emit CAMPAIGN_COMPLETED event (fire-and-forget)
-    const campaignDuration = Date.now() - campaignStartTime;
-    try {
-      const event = createEvent<CampaignCompletedPayload>(DomainEventType.CAMPAIGN_COMPLETED, {
-        totalContacts: result.totalContacts,
-        sentCount: result.sentCount,
-        failedCount: result.failedCount,
-        skippedCount: result.skippedCount,
-        durationMs: campaignDuration,
-      });
-      domainEvents.emit(event);
-    } catch {
-      // Silently ignore event emission errors
-    }
-
-    return result;
+    return await executeCampaignLoop(
+      actualCampaignId,
+      templateContent,
+      throttleController,
+      dryRun,
+      continuous,
+      result,
+      onProgress
+    );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     await logger.logError('Campaign Execution', errorMessage, {
       templateName: getSafeFilename(sanitizedTemplatePath),
+      campaignId: actualCampaignId,
     });
     throw error;
+  }
+}
+
+async function executeCampaignLoop(
+  campaignId: string,
+  templateContent: string,
+  throttleController: EmailThrottleController,
+  dryRun: boolean,
+  continuous: boolean,
+  result: CampaignResult,
+  onProgress?: ProgressCallback
+): Promise<CampaignResult> {
+  const campaignStartTime = Date.now();
+  let isPolling = true;
+
+  while (isPolling) {
+    const contacts = await getEligibleContacts(campaignId);
+
+    if (contacts.length === 0) {
+      if (!continuous) {
+        isPolling = false;
+        break;
+      }
+      await waitForLeads(result, onProgress);
+      continue;
+    }
+
+    await updateResultTotal(campaignId, result);
+    await processBatch(
+      contacts,
+      templateContent,
+      throttleController,
+      dryRun,
+      campaignId,
+      result,
+      onProgress
+    );
+
+    if (!continuous) {
+      isPolling = false;
+    }
+  }
+
+  emitCampaignCompleted(campaignId, result, Date.now() - campaignStartTime);
+  return result;
+}
+
+async function emitCampaignStarted(campaignId: string, mode: SendMode, templatePath: string) {
+  const initialContacts = await getEligibleContacts(campaignId);
+  if (initialContacts.length > 0) {
+    try {
+      const event = createEvent<CampaignStartedPayload>(DomainEventType.CAMPAIGN_STARTED, {
+        campaignId,
+        totalContacts: initialContacts.length,
+        mode,
+        templatePath,
+      });
+      domainEvents.emit(event);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function waitForLeads(result: CampaignResult, onProgress?: ProgressCallback) {
+  await reportProgress(onProgress, {
+    currentContact: result.sentCount + result.failedCount + result.skippedCount,
+    totalContacts: result.totalContacts,
+    email: '',
+    status: 'waiting',
+    message: 'Waiting for new leads to be appended...',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30000));
+}
+
+async function updateResultTotal(campaignId: string, result: CampaignResult) {
+  const currentEligibleCount = await getEligibleContactCount(campaignId);
+  result.totalContacts =
+    result.sentCount + result.failedCount + result.skippedCount + currentEligibleCount;
+}
+
+async function processBatch(
+  contacts: Contact[],
+  templateContent: string,
+  throttleController: EmailThrottleController,
+  dryRun: boolean,
+  campaignId: string,
+  result: CampaignResult,
+  onProgress?: ProgressCallback
+) {
+  const mode: SendMode = dryRun ? 'dry_run' : 'production';
+  for (const contact of contacts) {
+    try {
+      await processContact(
+        contact,
+        templateContent,
+        throttleController,
+        dryRun,
+        result,
+        campaignId,
+        onProgress,
+        result.sentCount + result.failedCount + result.skippedCount + 1,
+        result.totalContacts
+      );
+    } catch (error) {
+      await handleBatchError(contact, error, result, campaignId, mode, templateContent, onProgress);
+    }
+  }
+}
+
+async function handleBatchError(
+  contact: Contact,
+  error: unknown,
+  result: CampaignResult,
+  campaignId: string,
+  mode: SendMode,
+  templateContent: string,
+  onProgress?: ProgressCallback
+) {
+  const { subject, body } = extractSubject(processTemplate(templateContent, contact));
+  const bodyPreview = body.substring(0, 500);
+  const errorLog = await createSendLog(contact.id, mode, subject, bodyPreview, campaignId);
+  await handleContactError(contact, error, result, errorLog.id, campaignId);
+
+  await reportProgress(onProgress, {
+    currentContact: result.sentCount + result.failedCount + result.skippedCount,
+    totalContacts: result.totalContacts,
+    email: contact.email,
+    status: 'failed',
+    message: `Error processing ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
+  });
+}
+
+function emitCampaignCompleted(campaignId: string, result: CampaignResult, durationMs: number) {
+  try {
+    const event = createEvent<CampaignCompletedPayload>(DomainEventType.CAMPAIGN_COMPLETED, {
+      campaignId,
+      totalContacts: result.totalContacts,
+      sentCount: result.sentCount,
+      failedCount: result.failedCount,
+      skippedCount: result.skippedCount,
+      durationMs,
+    });
+    domainEvents.emit(event);
+  } catch {
+    /* ignore */
   }
 }
 

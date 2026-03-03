@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import { getEligibleContacts } from '../../db.js';
+import { getEligibleContactCount, getEligibleContacts } from '../../db.js';
 import { generatePreview, runCampaign } from '../../mailer.js';
 import type { CampaignResult, Contact, SendProgress } from '../../types.js';
 import type { CampaignViewStatus, LiveProgress, LogEntry } from '../types.js';
@@ -20,6 +20,8 @@ interface UseCampaignReturn {
   // State
   status: CampaignViewStatus;
   templatePath: string;
+  campaignId: string;
+  isContinuous: boolean;
   pendingCount: number;
   result: CampaignResult | null;
   error: string | null;
@@ -29,6 +31,8 @@ interface UseCampaignReturn {
 
   // Actions
   setTemplatePath: (path: string) => void;
+  setCampaignId: (id: string) => void;
+  setIsContinuous: (continuous: boolean) => void;
   loadPendingCount: () => Promise<void>;
   generateCampaignPreview: () => Promise<void>;
   startCampaign: () => Promise<void>;
@@ -45,6 +49,8 @@ export function useCampaign(): UseCampaignReturn {
   // Campaign state
   const [status, setStatus] = useState<CampaignViewStatus>('idle');
   const [templatePath, setTemplatePathState] = useState<string>('');
+  const [campaignId, setCampaignId] = useState<string>(crypto.randomUUID());
+  const [isContinuous, setIsContinuous] = useState<boolean>(true); // Default to continuous based on user request
   const [pendingCount, setPendingCount] = useState<number>(0);
   const [result, setResult] = useState<CampaignResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,12 +75,12 @@ export function useCampaign(): UseCampaignReturn {
 
   const loadPendingCount = useCallback(async () => {
     try {
-      const contacts = await getEligibleContacts();
-      setPendingCount(contacts.length);
+      const count = await getEligibleContactCount(campaignId);
+      setPendingCount(count);
     } catch {
       setPendingCount(0);
     }
-  }, []);
+  }, [campaignId]);
 
   const generateCampaignPreview = useCallback(async () => {
     if (!templatePath.trim()) {
@@ -88,9 +94,9 @@ export function useCampaign(): UseCampaignReturn {
     setPreview(null);
 
     try {
-      const contacts = await getEligibleContacts();
+      const contacts = await getEligibleContacts(campaignId, 1);
       if (contacts.length === 0) {
-        setError('No eligible contacts found. Import contacts first.');
+        setError('No eligible contacts found for this campaign. Import contacts first.');
         setStatus('error');
         return;
       }
@@ -107,7 +113,7 @@ export function useCampaign(): UseCampaignReturn {
       setError(errorMessage);
       setStatus('error');
     }
-  }, [templatePath]);
+  }, [templatePath, campaignId]);
 
   const startCampaign = useCallback(async () => {
     setStatus('running');
@@ -163,7 +169,9 @@ export function useCampaign(): UseCampaignReturn {
               });
             }
           }
-        }
+        },
+        campaignId,
+        isContinuous
       );
       setResult(campaignResult);
       setStatus('success');
@@ -172,7 +180,7 @@ export function useCampaign(): UseCampaignReturn {
       setError(errorMessage);
       setStatus('error');
     }
-  }, [templatePath]);
+  }, [templatePath, campaignId, isContinuous]);
 
   const confirmCampaign = useCallback(
     async (confirmed: boolean) => {
@@ -217,6 +225,8 @@ export function useCampaign(): UseCampaignReturn {
     // State
     status,
     templatePath,
+    campaignId,
+    isContinuous,
     pendingCount,
     result,
     error,
@@ -226,6 +236,8 @@ export function useCampaign(): UseCampaignReturn {
 
     // Actions
     setTemplatePath,
+    setCampaignId,
+    setIsContinuous,
     loadPendingCount,
     generateCampaignPreview,
     startCampaign,

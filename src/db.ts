@@ -95,6 +95,10 @@ function getSqlClient(): ReturnType<typeof postgres> {
       max: 10,
       idle_timeout: 20,
       connect_timeout: 10,
+      // Suppress PostgreSQL NOTICE messages (e.g., "truncate cascades to table...")
+      // These are internal implementation details that confuse users
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: Intentional empty handler to suppress notices
+      onnotice: () => {},
       transform: {
         column: { to: postgres.fromCamel, from: postgres.toCamel },
       },
@@ -305,37 +309,10 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_ses_message_events_message_id ON ses_message_events(message_id)
     `;
 
-    // Success message for CLI usage
-    if (require.main === module || process.argv[1]?.includes('db.ts')) {
-      const dbConfig = getDbConfig();
-      logger.info('✅ Database initialized successfully!');
-      logger.info(`   Database: ${dbConfig.database}`);
-      logger.info(
-        '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events'
-      );
-    }
-  } catch (error) {
-    throw new Error(
-      `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-}
+    // ============================================================================
+    // Analytics Tables (Event Tracking and Metrics)
+    // ============================================================================
 
-// ============================================================================
-// Analytics Tables Initialization
-// ============================================================================
-
-/**
- * Initialize analytics tables for event tracking and metrics
- * Creates tables if they don't exist - safe to call multiple times
- *
- * Analytics tables are kept separate from business tables to:
- * - Prevent analytics failures from affecting business operations
- * - Allow for independent scaling and optimization
- * - Enable future data retention policies
- */
-export async function createAnalyticsTables(): Promise<void> {
-  try {
     // Create analytics_events table (general event store)
     await sql`
       CREATE TABLE IF NOT EXISTS analytics_events (
@@ -447,16 +424,18 @@ export async function createAnalyticsTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_throttling_metrics_date ON throttling_metrics(date)
     `;
 
-    logger.info('✅ Analytics tables initialized successfully!');
+    // Success message for CLI usage
+    if (require.main === module || process.argv[1]?.includes('db.ts')) {
+      const dbConfig = getDbConfig();
+      logger.info('✅ Database initialized successfully!');
+      logger.info(`   Database: ${dbConfig.database}`);
+      logger.info(
+        '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events, verification_metrics, send_outcome_metrics, ses_api_metrics, throttling_metrics'
+      );
+    }
   } catch (error) {
-    // Log error but don't throw - analytics failures should not crash the app
-    await logger.logError(
-      'Failed to initialize analytics tables',
-      error instanceof Error ? error : new Error(String(error))
-    );
-    // Re-throw to let caller decide how to handle
     throw new Error(
-      `Failed to initialize analytics tables: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }
@@ -514,19 +493,30 @@ export async function getContacts(): Promise<Contact[]> {
 
 /**
  * Get contacts that are eligible for sending
- * A contact is eligible if it has no successful 'sent' log entry
- * In dev/test mode, this allows retries
+ * A contact is eligible if:
+ * 1. It has no successful 'sent' log entry for the specified campaign (or any if campaignId is null)
+ * 2. It has no 'CONTACT_INVALID' or 'CONTACT_DEEMED_UNSAFE' events in analytics
  *
+ * @param campaignId - Optional campaign ID to filter by
  * @param limit - Maximum number of contacts to return (default: 1000)
  * @returns Array of eligible contacts
  */
-export async function getEligibleContacts(limit: number = 1000): Promise<Contact[]> {
+export async function getEligibleContacts(
+  campaignId: string | null = null,
+  limit: number = 1000
+): Promise<Contact[]> {
   return await sql<Contact[]>`
     SELECT c.* FROM contacts c
     WHERE NOT EXISTS (
+      SELECT 1 FROM analytics_events ae
+      WHERE ae.contact_id = c.id
+      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+    )
+    AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'sent'
+      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
     ORDER BY c.created_at ASC
     LIMIT ${limit}
@@ -535,18 +525,24 @@ export async function getEligibleContacts(limit: number = 1000): Promise<Contact
 
 /**
  * Get count of eligible contacts for sending
+ * @param campaignId - Optional campaign ID to filter by
  */
-export async function getEligibleContactCount(): Promise<number> {
-  const [result] = await sql<{ count: number }[]>`
-    SELECT COUNT(*) as count
-    FROM contacts c
+export async function getEligibleContactCount(campaignId: string | null = null): Promise<number> {
+  const [result] = await sql<{ count: string }[]>`
+    SELECT COUNT(*) as count FROM contacts c
     WHERE NOT EXISTS (
+      SELECT 1 FROM analytics_events ae
+      WHERE ae.contact_id = c.id
+      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+    )
+    AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'sent'
+      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
   `;
-  return result?.count ?? 0;
+  return Number.parseInt(result.count || '0', 10);
 }
 
 /**
@@ -1323,7 +1319,8 @@ async function runStandalone(): Promise<void> {
   // Handle reset command
   if (args[0] === 'reset') {
     try {
-      await resetDatabase();
+      const result = await resetDatabase();
+      console.log(`\n✅ ${result.message}`);
       await closeConnection();
       process.exit(0);
     } catch (error) {
@@ -1343,6 +1340,7 @@ async function runStandalone(): Promise<void> {
   // Default: initialize schema
   try {
     await initializeSchema();
+    console.log('✅ Database initialized successfully');
     await closeConnection();
     process.exit(0);
   } catch (error) {
