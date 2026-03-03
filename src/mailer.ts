@@ -648,26 +648,7 @@ async function processContact(
     return;
   }
 
-  // Skip if email is not safe - no waiting for rejected contacts
-  if (!isEmailSafe(verificationOutcome.verificationResult)) {
-    await handleUnsafeEmail(
-      contact,
-      verificationOutcome.verificationResult,
-      result,
-      sendLogId,
-      campaignId
-    );
-    await reportProgress(onProgress, {
-      currentContact: current,
-      totalContacts: total,
-      email: contact.email,
-      status: 'skipped',
-      message: `Skipped ${contact.email} - unsafe email`,
-    });
-    return;
-  }
-
-  // Only wait for contacts that will actually be sent
+  // Apply throttle to ALL contacts, regardless of safety status
   await reportProgress(onProgress, {
     currentContact: current,
     totalContacts: total,
