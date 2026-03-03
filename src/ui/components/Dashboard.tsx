@@ -35,10 +35,10 @@ export function Dashboard(): React.ReactElement {
   const terminalHeight = stdout.rows;
   const terminalWidth = stdout.columns;
 
-  // Fixed element heights
-  const HEADER_HEIGHT = 3; // Header with border
+  // Fixed element heights - ultra compact
+  const HEADER_HEIGHT = 2; // Minimal header
   const STATUS_BAR_HEIGHT = 1; // Status bar height
-  const MARGINS = 1; // Reduced top and bottom margins
+  const MARGINS = 0; // No margins
 
   // Calculate available height for content
   const availableHeight = useMemo(
@@ -46,14 +46,14 @@ export function Dashboard(): React.ReactElement {
     [terminalHeight]
   );
 
-  // Calculate heights for different sections
+  // Calculate heights for different sections - very compact log area
   const sidebarHeight = availableHeight;
-  const logHeight = Math.max(3, Math.min(6, Math.floor(terminalHeight * 0.10)));
+  const logHeight = Math.max(3, Math.min(4, Math.floor(terminalHeight * 0.08)));
   const mainContentHeight = Math.max(6, availableHeight - logHeight);
 
-  // Calculate max entries for log output based on log panel height
+  // Calculate max entries for log output - limited to 4-5 max
   // Each log entry takes 1 line, and panel has padding + title
-  const logMaxEntries = Math.max(2, logHeight - 2);
+  const logMaxEntries = Math.max(2, Math.min(4, logHeight - 1));
 
   // Calculate max contacts to display based on available height
   // Header stats take ~3 lines, each contact takes 2 lines, plus some padding
