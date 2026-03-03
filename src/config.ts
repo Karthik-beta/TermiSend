@@ -170,3 +170,35 @@ export function shouldRedirectEmails(): boolean {
 
   return true;
 }
+
+// ============================================================================
+// Analytics Configuration
+// ============================================================================
+
+import type { AnalyticsConfig } from './types';
+
+/**
+ * Get analytics configuration from environment variables
+ * Controls SES analytics data collection and retention
+ * @returns AnalyticsConfig with validated settings
+ */
+export function getAnalyticsConfig(): AnalyticsConfig {
+  const env = getEnv();
+
+  return {
+    enabled: env.ANALYTICS_ENABLED !== 'false', // Default to true
+    syncIntervalMinutes: Number.parseInt(env.ANALYTICS_SYNC_INTERVAL_MINUTES || '60', 10),
+    retentionDays: Number.parseInt(env.ANALYTICS_RETENTION_DAYS || '90', 10),
+  };
+}
+
+/**
+ * Get SES analytics API rate limit
+ * AWS SES analytics APIs have a 1 request per second limit
+ * @returns Minimum delay between analytics API calls in milliseconds
+ */
+export function getAnalyticsRateLimitMs(): number {
+  const env = getEnv();
+  // Default to 1000ms (1 req/sec) as per AWS SES API limits
+  return Number.parseInt(env.ANALYTICS_RATE_LIMIT_MS || '1000', 10);
+}

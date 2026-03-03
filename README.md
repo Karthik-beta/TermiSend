@@ -11,6 +11,8 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
 - 🗄️ **Audit Logging**: Every action logged to PostgreSQL for compliance
 - 🖥️ **Terminal UI**: Beautiful TUI built with Ink and React
 - 📄 **Template Generator**: Download Excel templates with proper format
+- ⏱️ **Smart Throttling**: Configurable rate limiting to stay within SES quotas
+- 🔒 **Safety Controls**: Built-in safeguards to prevent accidental sends in development
 
 ## Tech Stack
 
@@ -22,6 +24,19 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
 - **Excel**: exceljs 4.4.0
 - **AWS**: @aws-sdk/client-ses
 - **Markdown**: marked
+
+## Quick Start
+
+1. **Prerequisites**: Install Bun and PostgreSQL
+2. **Clone & Install**: `git clone <repo> && cd termisend && bun install`
+3. **Environment**: Copy `.env.development` to `.env.development.local` and fill in your credentials
+4. **Verify Setup**: Run verification scripts to ensure everything is configured correctly
+   ```bash
+   bun run scripts/verify-ses.ts
+   bun run scripts/verify-myemailverifier.ts
+   ```
+5. **Initialize Database**: `bun run db:init`
+6. **Start**: `bun run dev`
 
 ## Prerequisites
 
@@ -65,29 +80,181 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
    cp .env.production .env.production.local
    ```
 
-   Edit the `.env.*.local` file with your credentials:
-   ```env
-   # Database Configuration
-   DB_HOST=localhost
-   DB_PORT=5432
-   DB_USER=postgres
-   DB_PASS=your_password
-   DB_NAME=termisend
+   See the [Environment Setup](#environment-setup) section for detailed configuration options.
 
-   # AWS SES Configuration
-   AWS_REGION=us-east-1
-   AWS_ACCESS_KEY_ID=your_access_key_id
-   AWS_SECRET_ACCESS_KEY=your_secret_access_key
-   SES_FROM_EMAIL=noreply@yourdomain.com
+4. **Verify your configuration**
 
-   # MyEmailVerifier API Configuration
-   MYEMAILVERIFIER_API_KEY=your_api_key
+   Before starting the application, verify that your API integrations are working:
+   ```bash
+   # Verify AWS SES configuration
+   bun run scripts/verify-ses.ts
+   
+   # Verify MyEmailVerifier API
+   bun run scripts/verify-myemailverifier.ts
    ```
 
-4. **Initialize the database**
+5. **Initialize the database**
    ```bash
    bun run db:init
    ```
+
+## Environment Setup
+
+### Required Configuration
+
+Configure the following in your `.env.development.local` or `.env.production.local`:
+
+#### Database Configuration
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASS=your_password
+DB_NAME=termisend
+```
+
+#### AWS SES Configuration
+```env
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+SES_FROM_EMAIL=noreply@yourdomain.com
+```
+
+#### MyEmailVerifier API Configuration
+```env
+MYEMAILVERIFIER_API_KEY=your_api_key
+```
+
+### Development / Safety Controls
+
+These settings help prevent accidental sends during development:
+
+```env
+# Redirect all emails to this address in development
+TEST_RECIPIENT_EMAIL=test@yourdomain.com
+
+# Set to 'true' to simulate verification without calling the API (saves credits)
+SIMULATE_VERIFIER=true
+
+# Set to 'true' to redirect all emails to TEST_RECIPIENT_EMAIL in dev mode
+REDIRECT_EMAILS=true
+```
+
+### Throttling Configuration
+
+Configure rate limiting to stay within AWS SES quotas:
+
+```env
+# Minimum delay between emails (milliseconds)
+THROTTLE_MIN_DELAY_MS=1000
+
+# Maximum delay between emails (milliseconds)
+THROTTLE_MAX_DELAY_MS=5000
+
+# Probability of taking a longer break (percentage)
+THROTTLE_BREAK_PROBABILITY_PERCENT=5
+
+# Minimum break duration (minutes)
+THROTTLE_BREAK_MIN_MINUTES=3
+
+# Maximum break duration (minutes)
+THROTTLE_BREAK_MAX_MINUTES=10
+
+# SES rate limit per second
+SES_RATE_LIMIT_PER_SECOND=14
+
+# Buffer percentage to stay below quota
+SES_QUOTA_BUFFER_PERCENT=10
+```
+
+## Verification Scripts
+
+Before running campaigns, verify your API configurations using these scripts:
+
+### AWS SES Verification
+
+The `scripts/verify-ses.ts` script checks your AWS SES configuration:
+
+```bash
+bun run scripts/verify-ses.ts
+```
+
+This script verifies:
+- AWS credentials are valid
+- SES account has sending enabled
+- Lists verified sender identities
+- Shows current send quota and sent count
+
+**Expected Output:**
+```
+✓ Environment variables configured
+✓ AWS credentials validated
+✓ SES account sending enabled
+✓ SES verified identities found
+✓ SES configuration verified successfully
+```
+
+### MyEmailVerifier Verification
+
+The `scripts/verify-myemailverifier.ts` script checks your email verification API:
+
+```bash
+bun run scripts/verify-myemailverifier.ts
+```
+
+This script verifies:
+- API key is configured
+- API key is valid (makes a test call)
+- Available verification credits
+
+**Expected Output:**
+```
+✓ MYEMAILVERIFIER_API_KEY is configured
+✓ API credentials validated
+✓ API test call successful
+✓ Account has X verification credits available
+✓ MyEmailVerifier configuration verified successfully
+```
+
+## API Integrations
+
+### AWS SES Integration
+
+TermiSend uses AWS SES for sending emails. The integration includes:
+
+- **Rate Limiting**: Automatically stays within SES rate limits
+- **Quota Management**: Respects daily sending quotas with configurable buffer
+- **Retry Logic**: Handles transient failures with exponential backoff
+- **Region Support**: Configurable AWS region
+
+**Verification Steps:**
+1. Run `bun run scripts/verify-ses.ts`
+2. Verify your sender email is listed in "Verified Identities"
+3. Check that "Account sending enabled" shows "Yes"
+4. Note your send quota limits
+
+### MyEmailVerifier Integration
+
+TermiSend uses MyEmailVerifier to validate email addresses before sending:
+
+- **Risk Assessment**: Classifies emails as valid, invalid, catch-all, etc.
+- **Credit Management**: Tracks available verification credits
+- **Safety Controls**: Can be simulated in development to save credits
+
+**Verification Steps:**
+1. Run `bun run scripts/verify-myemailverifier.ts`
+2. Confirm API key is valid
+3. Check available verification credits
+4. Note: Credits are deducted for each verification call
+
+**Email Verification Results:**
+- **Valid**: Safe to send (low risk)
+- **Invalid**: Will not send (high risk)
+- **Catch-all**: Domain accepts all emails (medium risk)
+- **Unknown**: Cannot verify (treated as risky)
+- **Disposable**: Temporary email (will not send)
+- **Role**: Role-based email like admin@ (medium risk)
 
 ## Usage
 
@@ -205,16 +372,26 @@ ALLOW_DEV_RESET=true bun run db:reset
 termisend/
 ├── src/
 │   ├── index.tsx          # Entry point - mounts Ink UI
-│   ├── ui.tsx             # Ink/React TUI components
+│   ├── ui/                # Ink/React TUI components
+│   │   ├── components/    # React components
+│   │   ├── hooks/         # Custom React hooks
+│   │   └── theme.ts       # UI theme configuration
 │   ├── db.ts              # Database connection, schema init, and reset
-│   ├── logger.ts         # Audit logging utility
-│   ├── importer.ts       # Excel import logic
+│   ├── logger.ts          # Audit logging utility
+│   ├── importer.ts        # Excel import logic
 │   ├── template-generator.ts  # Excel template generator
 │   ├── mailer.ts          # Spintax & markdown rendering
 │   ├── verifier.ts        # MyEmailVerifier API client
 │   ├── ses.ts             # AWS SES integration
-│   ├── path-validator.ts # Path validation for security
+│   ├── ses-quota.ts       # SES quota management
+│   ├── throttle.ts        # Rate limiting and throttling
+│   ├── path-validator.ts  # Path validation for security
+│   ├── config.ts          # Configuration management
 │   └── types.ts           # TypeScript type definitions
+├── scripts/               # Utility scripts
+│   ├── verify-ses.ts      # Verify AWS SES configuration
+│   ├── verify-myemailverifier.ts  # Verify MyEmailVerifier API
+│   └── migrate-send-logs.ts       # Log migration utility
 ├── templates/             # Email template samples
 ├── tests/                 # Unit and integration tests
 ├── .env.development       # Development environment template
@@ -277,6 +454,8 @@ termisend/
 | `bun run lint` | Run Biome linter |
 | `bun run lint:fix` | Fix linting issues automatically |
 | `bun test` | Run all tests |
+| `bun run scripts/verify-ses.ts` | Verify AWS SES configuration |
+| `bun run scripts/verify-myemailverifier.ts` | Verify MyEmailVerifier API |
 
 ## Environment Modes
 
@@ -319,7 +498,20 @@ The database reset feature includes multiple guardrails:
 
 **This makes it impossible to accidentally reset a production database.**
 
+### Development Safety Controls
+- `REDIRECT_EMAILS`: Redirect all emails to a test address in development
+- `SIMULATE_VERIFIER`: Simulate email verification to save API credits
+- `TEST_RECIPIENT_EMAIL`: Safe email address for testing
+
 ## Troubleshooting
+
+### Verification Script Failures
+
+If verification scripts fail:
+1. Check that `.env.development.local` exists and is properly configured
+2. Verify AWS credentials are correct and have SES permissions
+3. Confirm MyEmailVerifier API key is valid and has credits
+4. Check network connectivity to AWS and MyEmailVerifier APIs
 
 ### Database Connection Issues
 - Verify PostgreSQL is running
@@ -340,16 +532,23 @@ The database reset feature includes multiple guardrails:
 - Verify sender email is verified in SES console
 - Check if in sandbox mode (need to verify recipient emails too)
 - Verify AWS credentials have SES permissions
+- Run `bun run scripts/verify-ses.ts` for detailed diagnostics
 
 ### Email Verification Issues
 - Check MyEmailVerifier API key is valid
 - Verify API rate limits aren't exceeded
+- Run `bun run scripts/verify-myemailverifier.ts` for diagnostics
 
 ### Excel Import Issues
 - Ensure Excel file has headers: "Company Name", "Person Name", "Email"
 - Check file path is correct
 - Verify file is not corrupted
 - Use the built-in template generator (press T) to ensure correct format
+
+### Throttling Issues
+- If sending is too slow, adjust `THROTTLE_MIN_DELAY_MS` and `THROTTLE_MAX_DELAY_MS`
+- If hitting rate limits, ensure `SES_RATE_LIMIT_PER_SECOND` matches your SES quota
+- Increase `SES_QUOTA_BUFFER_PERCENT` if you're approaching daily limits
 
 ## Running Tests
 

@@ -169,6 +169,12 @@
                   "kind": "classProperty"
                 },
                 "formats": ["camelCase", "PascalCase", "CONSTANT_CASE", "snake_case"]
+              },
+              {
+                "selector": {
+                  "kind": "enumMember"
+                },
+                "formats": ["CONSTANT_CASE"]
               }
             ]
           }
