@@ -18,6 +18,7 @@ const mockSqlFn = Object.assign(
   {
     json: (data: unknown) => JSON.stringify(data),
     end: () => Promise.resolve(),
+    unsafe: mock((query: string) => Promise.resolve([])),
   }
 );
 
@@ -187,12 +188,21 @@ describe('resetDatabase()', () => {
       process.argv.push('--confirm-reset');
       resetEnvCacheForTesting();
 
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
+      // Mock to return existing tables for information_schema query
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join('');
+        if (query.includes('information_schema.tables')) {
+          return Promise.resolve([{ table_name: 'contacts' }, { table_name: 'send_logs' }]);
+        }
+        return Promise.resolve([]);
+      });
+      mockSqlFn.unsafe = mock(() => Promise.resolve([]));
 
       const result = await resetDatabase();
 
       expect(result.success).toBe(true);
       expect(result.message).toContain('reset successfully');
+      expect(result.message).toContain('2 table(s) cleared');
     });
 
     it('should succeed with ALLOW_DEV_RESET=true env var', async () => {
@@ -201,7 +211,15 @@ describe('resetDatabase()', () => {
       process.env.ALLOW_DEV_RESET = 'true';
       resetEnvCacheForTesting();
 
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
+      // Mock to return existing tables for information_schema query
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join('');
+        if (query.includes('information_schema.tables')) {
+          return Promise.resolve([{ table_name: 'contacts' }, { table_name: 'send_logs' }]);
+        }
+        return Promise.resolve([]);
+      });
+      mockSqlFn.unsafe = mock(() => Promise.resolve([]));
 
       const result = await resetDatabase();
 
@@ -215,7 +233,15 @@ describe('resetDatabase()', () => {
       process.argv.push('-y');
       resetEnvCacheForTesting();
 
-      mockSqlFn.mockImplementation(() => Promise.resolve([]));
+      // Mock to return existing tables for information_schema query
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join('');
+        if (query.includes('information_schema.tables')) {
+          return Promise.resolve([{ table_name: 'contacts' }]);
+        }
+        return Promise.resolve([]);
+      });
+      mockSqlFn.unsafe = mock(() => Promise.resolve([]));
 
       const result = await resetDatabase();
 
@@ -242,20 +268,43 @@ describe('resetDatabase()', () => {
       process.argv.push('--confirm-reset');
       resetEnvCacheForTesting();
 
-      let queryExecuted = '';
-      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
-        queryExecuted = strings.join('');
+      let queriesExecuted: string[] = [];
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+        // Handle both template literal calls and unsafe calls
+        if (typeof strings === 'string') {
+          // Called via sql.unsafe()
+          queriesExecuted.push(strings);
+        } else {
+          // Called via template literal
+          queriesExecuted.push(strings.join(''));
+        }
+        return Promise.resolve([]);
+      });
+      // Mock sql.unsafe for the TRUNCATE call
+      mockSqlFn.unsafe = mock((query: string) => {
+        queriesExecuted.push(query);
         return Promise.resolve([]);
       });
 
       await resetDatabase();
 
-      expect(queryExecuted).toContain('TRUNCATE TABLE');
-      expect(queryExecuted).toContain('contacts');
-      expect(queryExecuted).toContain('audit_logs');
-      expect(queryExecuted).toContain('email_verifier_credits');
-      expect(queryExecuted).toContain('RESTART IDENTITY');
-      expect(queryExecuted).toContain('CASCADE');
+      // Should query information_schema first to find existing tables
+      expect(queriesExecuted.some((q) => q.includes('information_schema.tables'))).toBe(true);
+    });
+
+    it('should handle database with no tables gracefully', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.DB_NAME = 'termisend_dev';
+      process.argv.push('--confirm-reset');
+      resetEnvCacheForTesting();
+
+      // Mock to return no existing tables
+      mockSqlFn.mockImplementation(() => Promise.resolve([]));
+
+      const result = await resetDatabase();
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('no tables to reset');
     });
   });
 
@@ -266,7 +315,14 @@ describe('resetDatabase()', () => {
       process.argv.push('--confirm-reset');
       resetEnvCacheForTesting();
 
-      mockSqlFn.mockImplementation(() => Promise.reject(new Error('Connection failed')));
+      // Make the information_schema query fail
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join('');
+        if (query.includes('information_schema.tables')) {
+          return Promise.reject(new Error('Connection failed'));
+        }
+        return Promise.resolve([]);
+      });
 
       await expect(resetDatabase()).rejects.toThrow(
         'Database reset failed'

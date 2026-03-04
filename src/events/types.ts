@@ -44,6 +44,17 @@ export enum DomainEventType {
   CAMPAIGN_STARTED = 'CAMPAIGN_STARTED',
   CAMPAIGN_COMPLETED = 'CAMPAIGN_COMPLETED',
   CAMPAIGN_PAUSED = 'CAMPAIGN_PAUSED',
+
+  // SES lifecycle events
+  SES_EVENT_RECEIVED = 'SES_EVENT_RECEIVED',
+  SES_BOUNCE_PROCESSED = 'SES_BOUNCE_PROCESSED',
+  SES_COMPLAINT_PROCESSED = 'SES_COMPLAINT_PROCESSED',
+  SES_DELIVERY_CONFIRMED = 'SES_DELIVERY_CONFIRMED',
+  SES_OPEN_RECORDED = 'SES_OPEN_RECORDED',
+  SES_CLICK_RECORDED = 'SES_CLICK_RECORDED',
+
+  // Contact suppression events
+  CONTACT_SUPPRESSED = 'CONTACT_SUPPRESSED',
 }
 
 // ============================================================================
@@ -183,6 +194,13 @@ export interface EmailSentPayload {
 }
 
 /**
+ * Type of failure for retry logic
+ * - permanent: Never retry (config errors, invalid email, etc.)
+ * - transient: Retry with delays (API errors, network timeouts, etc.)
+ */
+export type FailureType = 'permanent' | 'transient';
+
+/**
  * Payload for EMAIL_FAILED event
  * Emitted when an email send attempt fails
  */
@@ -196,9 +214,13 @@ export interface EmailFailedPayload {
   /** Error reason */
   errorReason: string;
   /** Error category */
-  errorCategory: 'ses_error' | 'verification_error' | 'throttle_error' | 'other';
+  errorCategory: 'ses_error' | 'verification_error' | 'throttle_error' | 'other' | 'config_error';
   /** Retry attempt number */
   retryAttempt?: number;
+  /** Type of failure - determines if retry should be attempted */
+  failureType?: FailureType;
+  /** If true, the campaign should be stopped (critical config errors) */
+  stopCampaign?: boolean;
 }
 
 /**
@@ -383,6 +405,99 @@ export interface CampaignPausedPayload {
 }
 
 // ============================================================================
+// SES Event Payloads
+// ============================================================================
+
+/**
+ * Payload for SES_EVENT_RECEIVED event
+ * Emitted when an SES event is received from SQS
+ */
+export interface SESEventReceivedPayload {
+  eventId: string;
+  eventType: string;
+  messageId: string;
+  recipientCount: number;
+}
+
+/**
+ * Payload for SES_BOUNCE_PROCESSED event
+ * Emitted when a bounce event is processed
+ */
+export interface SESBounceProcessedPayload {
+  eventId: string;
+  messageId: string;
+  contactId: string;
+  sendLogId: string;
+  bounceType: 'Permanent' | 'Transient';
+  bouncedRecipients: string[];
+  suppressed: boolean;
+}
+
+/**
+ * Payload for SES_COMPLAINT_PROCESSED event
+ * Emitted when a complaint event is processed
+ */
+export interface SESComplaintProcessedPayload {
+  eventId: string;
+  messageId: string;
+  contactId: string;
+  sendLogId: string;
+  complaintFeedbackType?: string;
+  suppressed: boolean;
+}
+
+/**
+ * Payload for SES_DELIVERY_CONFIRMED event
+ * Emitted when a delivery is confirmed
+ */
+export interface SESDeliveryConfirmedPayload {
+  eventId: string;
+  messageId: string;
+  contactId: string;
+  sendLogId: string;
+  deliveredRecipients: string[];
+  processingTimeMs: number;
+}
+
+/**
+ * Payload for SES_OPEN_RECORDED event
+ * Emitted when an email open is recorded
+ */
+export interface SESOpenRecordedPayload {
+  eventId: string;
+  messageId: string;
+  contactId: string;
+  sendLogId: string;
+  ipAddress: string;
+  userAgent: string;
+}
+
+/**
+ * Payload for SES_CLICK_RECORDED event
+ * Emitted when an email link click is recorded
+ */
+export interface SESClickRecordedPayload {
+  eventId: string;
+  messageId: string;
+  contactId: string;
+  sendLogId: string;
+  link: string;
+  ipAddress: string;
+  userAgent: string;
+}
+
+/**
+ * Payload for CONTACT_SUPPRESSED event
+ * Emitted when a contact is suppressed due to bounce/complaint
+ */
+export interface ContactSuppressedPayload {
+  contactId: string;
+  messageId: string;
+  reason: string;
+  suppressionType: 'bounce' | 'complaint' | 'manual';
+}
+
+// ============================================================================
 // Union Types
 // ============================================================================
 
@@ -409,7 +524,14 @@ export type DomainEventPayload =
   | ThrottleDelayCompletedPayload
   | CampaignStartedPayload
   | CampaignCompletedPayload
-  | CampaignPausedPayload;
+  | CampaignPausedPayload
+  | SESEventReceivedPayload
+  | SESBounceProcessedPayload
+  | SESComplaintProcessedPayload
+  | SESDeliveryConfirmedPayload
+  | SESOpenRecordedPayload
+  | SESClickRecordedPayload
+  | ContactSuppressedPayload;
 
 // ============================================================================
 // Domain Event Interface

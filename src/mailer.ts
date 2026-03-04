@@ -5,18 +5,20 @@
 
 // Node built-ins
 import crypto from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import fs, { readFile } from 'node:fs/promises';
 
 // External libraries
 import { marked } from 'marked';
-
+import { getEmailTemplatePath, getSubjectTemplatePath } from './config.js';
 // Local modules (alphabetical)
 import {
   createSendLog,
   getEligibleContactCount,
   getEligibleContacts,
+  incrementRetryCount,
   updateSendLog,
 } from './db.js';
+import { emitAnalyticsEvent } from './events/bus.js';
 import {
   type CampaignCompletedPayload,
   type CampaignStartedPayload,
@@ -35,7 +37,7 @@ import { logger } from './logger.js';
 import { validateTemplatePath } from './path-validator.js';
 import { sendEmail } from './ses.js';
 import { analyticsEvents } from './ses-analytics.js';
-import { isShuttingDown } from './shutdown.js';
+import { isShuttingDown, throwIfShuttingDown } from './shutdown.js';
 import { EmailThrottleController, getEmailThrottleController } from './throttle.js';
 // Type imports
 import type {
@@ -43,10 +45,13 @@ import type {
   Contact,
   EmailSendParams,
   EmailVerificationResponse,
+  FailureClassification,
+  FailureType,
   ProgressCallback,
   SendMode,
   SendProgress,
 } from './types.js';
+import { MAX_RETRIES, RETRY_DELAYS } from './types.js';
 import { getSafeFilename } from './utils/security.js';
 import { isEmailSafe, verifyEmail } from './verifier.js';
 
@@ -60,7 +65,163 @@ export const __test = {
   verifyEmail: verifyEmail,
   emailThrottleController: EmailThrottleController,
   resetThrottleController: () => EmailThrottleController.resetInstance(),
+  classifyError: classifyError,
+  validateCriticalConfig: validateCriticalConfig,
+  validateTemplateFiles: validateTemplateFiles,
 };
+
+// ============================================================================
+// Error Classification and Campaign Control
+// ============================================================================
+
+/** Campaign stop flag for critical errors */
+let campaignStopped = false;
+let campaignStopReason: string | null = null;
+
+/**
+ * Check if the campaign has been stopped due to a critical error
+ */
+export function isCampaignStopped(): boolean {
+  return campaignStopped;
+}
+
+/**
+ * Get the reason the campaign was stopped
+ */
+export function getCampaignStopReason(): string | null {
+  return campaignStopReason;
+}
+
+/**
+ * Stop the campaign due to a critical error
+ * This is irreversible for the current campaign run
+ */
+function stopCampaign(reason: string): void {
+  campaignStopped = true;
+  campaignStopReason = reason;
+  logger.logError('Campaign', `Campaign stopped: ${reason}`).catch(() => {
+    // Ignore logging errors
+  });
+}
+
+/**
+ * Reset the campaign stop state (for testing or new campaign)
+ */
+export function resetCampaignState(): void {
+  campaignStopped = false;
+  campaignStopReason = null;
+}
+
+/**
+ * Validate critical configuration before starting campaign
+ * Returns error message if critical config is missing, null if OK
+ */
+function validateCriticalConfig(): string | null {
+  const templatePath = getEmailTemplatePath();
+  const subjectPath = getSubjectTemplatePath();
+
+  if (!templatePath) {
+    return 'EMAIL_TEMPLATE_PATH is not configured';
+  }
+  if (!subjectPath) {
+    return 'SUBJECT_TEMPLATE_PATH is not configured';
+  }
+  return null;
+}
+
+/**
+ * Check if template files are readable
+ * Returns error message if files cannot be read, null if OK
+ */
+async function validateTemplateFiles(): Promise<string | null> {
+  const templatePath = getEmailTemplatePath();
+  const subjectPath = getSubjectTemplatePath();
+
+  try {
+    await fs.access(templatePath);
+  } catch {
+    return `Email template file not found or not readable: ${templatePath}`;
+  }
+
+  try {
+    await fs.access(subjectPath);
+  } catch {
+    return `Subject template file not found or not readable: ${subjectPath}`;
+  }
+
+  return null;
+}
+
+/**
+ * Classify an error to determine retry behavior
+ * @param error - The error to classify
+ * @returns Classification with retry behavior
+ */
+function classifyError(error: unknown): FailureClassification {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const lowerMessage = errorMessage.toLowerCase();
+
+  // Critical configuration errors - stop campaign immediately
+  if (
+    lowerMessage.includes('email_template_path') ||
+    lowerMessage.includes('subject_template_path') ||
+    lowerMessage.includes('template file not found') ||
+    lowerMessage.includes('template file not readable') ||
+    lowerMessage.includes('invalid template path')
+  ) {
+    return {
+      type: 'permanent',
+      retryable: false,
+      stopCampaign: true,
+    };
+  }
+
+  // Permanent failures - never retry
+  if (
+    lowerMessage.includes('template missing') ||
+    lowerMessage.includes('subject template missing') ||
+    lowerMessage.includes('invalid email') ||
+    lowerMessage.includes('email status: invalid') ||
+    lowerMessage.includes('verification failed') ||
+    lowerMessage.includes('markdown parsing error') ||
+    lowerMessage.includes('spintax') ||
+    lowerMessage.includes('invalid configuration')
+  ) {
+    return {
+      type: 'permanent',
+      retryable: false,
+      stopCampaign: false,
+    };
+  }
+
+  // Transient failures - retry with delays
+  if (
+    lowerMessage.includes('timeout') ||
+    lowerMessage.includes('network') ||
+    lowerMessage.includes('rate limit') ||
+    lowerMessage.includes('throttling') ||
+    lowerMessage.includes('temporary') ||
+    lowerMessage.includes('service unavailable') ||
+    lowerMessage.includes('internal server error') ||
+    lowerMessage.includes('ses api error') ||
+    lowerMessage.includes('connection') ||
+    lowerMessage.includes('econnrefused') ||
+    lowerMessage.includes('socket hang up')
+  ) {
+    return {
+      type: 'transient',
+      retryable: true,
+      stopCampaign: false,
+    };
+  }
+
+  // Default to transient for unknown errors (safer to retry)
+  return {
+    type: 'transient',
+    retryable: true,
+    stopCampaign: false,
+  };
+}
 
 // ============================================================================
 // Spintax Parser
@@ -173,6 +334,52 @@ function splitOptions(content: string): string[] {
 }
 
 // ============================================================================
+// Placeholder Replacement
+// ============================================================================
+
+/**
+ * Replace placeholders with contact data and fallbacks
+ *
+ * @param template - Template string with placeholders
+ * @param contact - Contact to personalize for
+ * @returns Template with placeholders replaced
+ */
+function replacePlaceholders(template: string, contact: Contact): string {
+  const name = contact.personName?.trim() || 'Sir/Madam';
+  const company = contact.companyName?.trim() || 'Company';
+
+  return template.replaceAll('[Name]', name).replaceAll('[Company-Name]', company);
+}
+
+/**
+ * Load and process the subject spintax file
+ *
+ * @returns Subject template content
+ * @throws Error if subject template cannot be loaded
+ */
+async function loadSubjectTemplate(): Promise<string> {
+  const subjectPath = getSubjectTemplatePath();
+  try {
+    const content = await fs.readFile(subjectPath, 'utf-8');
+    return content.trim();
+  } catch (error) {
+    throw new Error(`Failed to load subject template: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Generate the final subject line for a contact
+ *
+ * @param contact - Contact to generate subject for
+ * @returns Final subject line with placeholders replaced and spintax parsed
+ */
+export async function generateSubject(contact: Contact): Promise<string> {
+  const template = await loadSubjectTemplate();
+  const withPlaceholders = replacePlaceholders(template, contact);
+  return parseSpintax(withPlaceholders);
+}
+
+// ============================================================================
 // Template Processing
 // ============================================================================
 
@@ -184,13 +391,10 @@ function splitOptions(content: string): string[] {
  * @returns Processed template
  */
 export function processTemplate(template: string, contact: Contact): string {
-  // Replace {Person Name} placeholder
-  let processed = template.replace(/\{Person Name\}/g, contact.personName);
+  // First replace placeholders with contact data
+  let processed = replacePlaceholders(template, contact);
 
-  // Replace {Company Name} placeholder
-  processed = processed.replace(/\{Company Name\}/g, contact.companyName);
-
-  // Parse spintax
+  // Then parse spintax
   processed = parseSpintax(processed);
 
   return processed;
@@ -289,8 +493,14 @@ async function verifyContactEmail(
   result: CampaignResult,
   sendLogId: string
 ): Promise<VerificationOutcome> {
+  // Check for shutdown before starting verification
+  throwIfShuttingDown();
+
   try {
     const verificationResult = await verifyEmail(contact.email);
+
+    // Check for shutdown after verification completes
+    throwIfShuttingDown();
 
     // Emit verification events for analytics
     if (verificationResult.status === 'invalid') {
@@ -304,6 +514,16 @@ async function verifyContactEmail(
       } catch {
         /* ignore */
       }
+      // Emit analytics event for real-time dashboard
+      try {
+        emitAnalyticsEvent({
+          type: 'contact:verified',
+          id: Number(contact.id),
+          isValid: false,
+        });
+      } catch {
+        // Silently ignore event emission errors
+      }
     } else if (isEmailSafe(verificationResult)) {
       try {
         const event = createEvent<ContactVerifiedPayload>(DomainEventType.CONTACT_VERIFIED, {
@@ -314,6 +534,16 @@ async function verifyContactEmail(
         domainEvents.emit(event);
       } catch {
         /* ignore */
+      }
+      // Emit analytics event for real-time dashboard
+      try {
+        emitAnalyticsEvent({
+          type: 'contact:verified',
+          id: Number(contact.id),
+          isValid: true,
+        });
+      } catch {
+        // Silently ignore event emission errors
       }
     } else {
       try {
@@ -328,6 +558,16 @@ async function verifyContactEmail(
         domainEvents.emit(event);
       } catch {
         /* ignore */
+      }
+      // Emit analytics event for real-time dashboard (invalid since not safe)
+      try {
+        emitAnalyticsEvent({
+          type: 'contact:verified',
+          id: Number(contact.id),
+          isValid: false,
+        });
+      } catch {
+        // Silently ignore event emission errors
       }
     }
 
@@ -386,6 +626,17 @@ async function handleUnsafeEmail(
       skipCategory: 'unsafe_email',
     });
     domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
+
+  // Emit analytics event for real-time dashboard
+  try {
+    emitAnalyticsEvent({
+      type: 'email:skipped',
+      contactId: Number(contact.id),
+      reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
+    });
   } catch {
     // Silently ignore event emission errors
   }
@@ -486,10 +737,17 @@ async function handleSuccessfulSend(
   } catch {
     // Silently ignore event emission errors
   }
+
+  // Emit analytics event for real-time dashboard
+  try {
+    emitAnalyticsEvent({ type: 'email:sent', contactId: Number(contact.id) });
+  } catch {
+    // Silently ignore event emission errors
+  }
 }
 
 /**
- * Handle failed email send
+ * Handle failed email send with retry support
  * Updates send log with 'failed' status and error reason
  * Emits analytics event for tracking
  */
@@ -499,7 +757,9 @@ async function handleFailedSend(
   result: CampaignResult,
   sendLogId: string,
   subject: string,
-  campaignId?: string
+  campaignId?: string,
+  retryAttempt: number = 0,
+  failureType: FailureType = 'transient'
 ): Promise<void> {
   result.failedCount++;
   result.details.push({
@@ -507,22 +767,27 @@ async function handleFailedSend(
     status: 'failed',
     reason: errorReason,
   });
-  // Update send log with failure
+  // Update send log with failure - set retry_count to MAX_RETRIES for permanent failures
+  // This prevents them from being selected again
+  const finalRetryCount = failureType === 'permanent' ? MAX_RETRIES : retryAttempt;
   await updateSendLog(sendLogId, {
     status: 'failed',
     errorReason,
+    retryCount: finalRetryCount,
   });
   await logger.logSendLogUpdated(sendLogId, 'pending', 'failed', {
     email: contact.email,
     subject,
     error: errorReason,
+    retryAttempt,
+    failureType,
   });
   // Emit analytics event
   analyticsEvents.emit('FAILURE', {
     contactId: contact.id,
     sendLogId,
     timestamp: new Date(),
-    details: { subject, email: contact.email, error: errorReason },
+    details: { subject, email: contact.email, error: errorReason, retryAttempt, failureType },
   });
   // Emit EMAIL_FAILED domain event (fire-and-forget)
   try {
@@ -532,25 +797,41 @@ async function handleFailedSend(
       campaignId,
       errorReason,
       errorCategory: 'ses_error',
+      retryAttempt,
+      failureType,
     });
     domainEvents.emit(event);
+  } catch {
+    // Silently ignore event emission errors
+  }
+
+  // Emit analytics event for real-time dashboard
+  try {
+    emitAnalyticsEvent({
+      type: 'email:failed',
+      contactId: Number(contact.id),
+      error: errorReason,
+    });
   } catch {
     // Silently ignore event emission errors
   }
 }
 
 /**
- * Handle contact processing error
- * Updates send log with 'failed' status
+ * Handle contact processing error with retry support
+ * Updates send log with 'failed' status and classifies error
  */
 async function handleContactError(
   contact: Contact,
   error: unknown,
   result: CampaignResult,
   sendLogId: string,
-  campaignId?: string
-): Promise<void> {
+  campaignId?: string,
+  retryAttempt: number = 0
+): Promise<FailureClassification> {
   const errorMsg = error instanceof Error ? error.message : String(error);
+  const classification = classifyError(error);
+
   result.failedCount++;
   result.details.push({
     email: contact.email,
@@ -560,12 +841,18 @@ async function handleContactError(
   await logger.logError('Campaign Processing', errorMsg, {
     email: contact.email,
     contact: { companyName: contact.companyName, personName: contact.personName },
+    failureType: classification.type,
+    retryable: classification.retryable,
   });
-  // Update send log with failure
+
+  // Update send log with failure - set retry_count to MAX_RETRIES for permanent failures
+  const finalRetryCount = classification.type === 'permanent' ? MAX_RETRIES : retryAttempt;
   await updateSendLog(sendLogId, {
     status: 'failed',
     errorReason: errorMsg,
+    retryCount: finalRetryCount,
   });
+
   // Emit EMAIL_FAILED domain event (fire-and-forget)
   try {
     const event = createEvent<EmailFailedPayload>(DomainEventType.EMAIL_FAILED, {
@@ -574,11 +861,16 @@ async function handleContactError(
       campaignId,
       errorReason: errorMsg,
       errorCategory: 'other',
+      retryAttempt,
+      failureType: classification.type,
+      stopCampaign: classification.stopCampaign,
     });
     domainEvents.emit(event);
   } catch {
     // Silently ignore event emission errors
   }
+
+  return classification;
 }
 
 /**
@@ -615,10 +907,10 @@ async function processContact(
   const current = currentContactIndex ?? 0;
   const total = totalContacts ?? 1;
 
-  // Process template first to get subject for the log
+  // Process template and generate subject
   const processedTemplate = processTemplate(templateContent, contact);
-  const { subject, body } = extractSubject(processedTemplate);
-  const bodyPreview = body.substring(0, 500);
+  const subject = await generateSubject(contact);
+  const bodyPreview = processedTemplate.substring(0, 500);
 
   // Determine mode based on dryRun flag
   const mode: SendMode = dryRun ? 'dry_run' : 'production';
@@ -688,8 +980,8 @@ async function processContact(
     message: `Sending to ${contact.email}...`,
   });
 
-  const htmlBody = await renderMarkdown(body);
-  const textBody = generatePlainText(body);
+  const htmlBody = await renderMarkdown(processedTemplate);
+  const textBody = generatePlainText(processedTemplate);
 
   // Send email
   const emailParams: EmailSendParams = {
@@ -713,13 +1005,103 @@ async function processContact(
     // Silently ignore event emission errors
   }
 
-  const sendResult = await sendEmail(emailParams, throttleController);
+  // Send email with retry logic for transient failures
+  let sendResult = await sendEmail(emailParams, throttleController);
+  let retryAttempt = 0;
 
   // CRITICAL FIX: Check shutdown before updating database
   if (isShuttingDown()) {
     throw new Error('Shutdown requested after send but before log update');
   }
 
+  // Handle send failure with retry logic
+  if (!sendResult.success) {
+    const error = new Error(sendResult.error || 'Unknown error');
+    const classification = classifyError(error);
+
+    // For transient errors, retry up to MAX_RETRIES with delays
+    if (classification.retryable && classification.type === 'transient') {
+      while (retryAttempt < MAX_RETRIES && !sendResult.success && !isShuttingDown()) {
+        retryAttempt++;
+        const delayMs = RETRY_DELAYS[retryAttempt as keyof typeof RETRY_DELAYS] || 5000;
+
+        // Log retry attempt
+        await logger.info(
+          `Retry ${retryAttempt}/${MAX_RETRIES} for ${contact.email} after ${delayMs}ms: ${sendResult.error}`
+        );
+
+        // Report retry progress
+        await reportProgress(onProgress, {
+          currentContact: current,
+          totalContacts: total,
+          email: contact.email,
+          status: 'waiting',
+          message: `Retry ${retryAttempt}/${MAX_RETRIES} for ${contact.email}...`,
+        });
+
+        // Wait before retry
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        // Check shutdown after wait
+        if (isShuttingDown()) {
+          throw new Error('Shutdown requested during retry wait');
+        }
+
+        // Update retry count in database
+        await incrementRetryCount(sendLogId);
+
+        // Retry send
+        sendResult = await sendEmail(emailParams, throttleController);
+      }
+    }
+
+    // For permanent errors or after max retries, handle as failure
+    if (!sendResult.success) {
+      await handleFailedSend(
+        contact,
+        sendResult.error || 'Unknown error',
+        result,
+        sendLogId,
+        subject,
+        campaignId,
+        retryAttempt,
+        classification.type
+      );
+      await reportProgress(onProgress, {
+        currentContact: current,
+        totalContacts: total,
+        email: contact.email,
+        status: 'failed',
+        message: `Failed to send to ${contact.email}: ${sendResult.error || 'Unknown error'}${retryAttempt > 0 ? ` (after ${retryAttempt} retries)` : ''}`,
+      });
+
+      // CRITICAL FIX: Apply throttle AFTER failed send to control rate to NEXT email
+      await reportProgress(onProgress, {
+        currentContact: current,
+        totalContacts: total,
+        email: contact.email,
+        status: 'waiting',
+        message: 'Waiting before next send...',
+      });
+
+      await throttleController.waitBeforeSend((remainingMs, totalMs) => {
+        reportProgress(onProgress, {
+          currentContact: current,
+          totalContacts: total,
+          email: contact.email,
+          status: 'waiting',
+          waitTimeRemainingMs: remainingMs,
+          totalWaitTimeMs: totalMs,
+          message: `Waiting ${Math.ceil(remainingMs / 1000)}s before next send...`,
+        }).catch(() => {
+          // Silently ignore progress callback errors
+        });
+      });
+      return;
+    }
+  }
+
+  // Handle successful send (either first attempt or after retries)
   if (sendResult.success) {
     await handleSuccessfulSend(
       contact,
@@ -735,23 +1117,10 @@ async function processContact(
       totalContacts: total,
       email: contact.email,
       status: 'completed',
-      message: `Sent to ${contact.email}`,
-    });
-  } else {
-    await handleFailedSend(
-      contact,
-      sendResult.error || 'Unknown error',
-      result,
-      sendLogId,
-      subject,
-      campaignId
-    );
-    await reportProgress(onProgress, {
-      currentContact: current,
-      totalContacts: total,
-      email: contact.email,
-      status: 'failed',
-      message: `Failed to send to ${contact.email}: ${sendResult.error || 'Unknown error'}`,
+      message:
+        retryAttempt > 0
+          ? `Sent to ${contact.email} (after ${retryAttempt} retries)`
+          : `Sent to ${contact.email}`,
     });
   }
 
@@ -783,7 +1152,6 @@ async function processContact(
 /**
  * Run email campaign for all eligible contacts
  *
- * @param templatePath - Path to markdown template file
  * @param dryRun - If true, don't actually send emails (for testing)
  * @param onProgress - Optional callback for real-time progress updates
  * @param campaignId - Optional campaign ID to filter by
@@ -791,12 +1159,16 @@ async function processContact(
  * @returns Campaign result summary
  */
 export async function runCampaign(
-  templatePath: string,
   dryRun: boolean = false,
   onProgress?: ProgressCallback,
   campaignId?: string,
   continuous: boolean = false
 ): Promise<CampaignResult> {
+  // Reset campaign state at the start of each campaign
+  resetCampaignState();
+
+  const templatePath = getEmailTemplatePath();
+
   const result: CampaignResult = {
     totalContacts: 0,
     sentCount: 0,
@@ -804,6 +1176,22 @@ export async function runCampaign(
     skippedCount: 0,
     details: [],
   };
+
+  // CRITICAL: Validate configuration before doing anything else
+  const configError = validateCriticalConfig();
+  if (configError) {
+    const error = new Error(`Critical configuration error: ${configError}`);
+    await logger.logError('Campaign Startup', configError, {});
+    throw error;
+  }
+
+  // Validate template files are readable
+  const fileError = await validateTemplateFiles();
+  if (fileError) {
+    const error = new Error(`Critical configuration error: ${fileError}`);
+    await logger.logError('Campaign Startup', fileError, {});
+    throw error;
+  }
 
   // Validate template path
   const pathValidation = validateTemplatePath(templatePath);
@@ -854,6 +1242,12 @@ async function executeCampaignLoop(
   while (isPolling) {
     // Check for shutdown before each iteration
     if (isShuttingDown()) {
+      isPolling = false;
+      break;
+    }
+
+    // Check if campaign was stopped due to critical error
+    if (isCampaignStopped()) {
       isPolling = false;
       break;
     }
@@ -967,6 +1361,25 @@ async function processBatch(
       if (error instanceof Error && error.message === 'Shutdown requested') {
         break;
       }
+
+      // Check for critical errors that should stop the campaign
+      const classification = classifyError(error);
+      if (classification.stopCampaign) {
+        stopCampaign(
+          `Critical error for ${contact.email}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        await handleBatchError(
+          contact,
+          error,
+          result,
+          campaignId,
+          mode,
+          templateContent,
+          onProgress
+        );
+        break;
+      }
+
       await handleBatchError(contact, error, result, campaignId, mode, templateContent, onProgress);
     }
   }
@@ -1020,9 +1433,10 @@ function emitCampaignCompleted(campaignId: string, result: CampaignResult, durat
  * Useful for testing templates before sending
  */
 export async function generatePreview(
-  templatePath: string,
   sampleContact: Contact
 ): Promise<{ subject: string; htmlBody: string; textBody: string }> {
+  const templatePath = getEmailTemplatePath();
+
   // Validate template path for security
   const pathValidation = validateTemplatePath(templatePath);
   if (!pathValidation.valid) {

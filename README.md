@@ -441,6 +441,118 @@ termisend/
 - `CONTACT_UPDATED` - Contact status changed
 - `ERROR` - Error occurred
 
+## SQS Event Consumer (Optional)
+
+### Overview
+
+The SQS Event Consumer is an optional module that polls an AWS SQS queue for SES email events, enabling real-time tracking of email delivery, bounces, complaints, and engagement metrics. The application works without this feature - emails will still be sent and tracked via SES analytics sync, but real-time event processing provides faster updates and richer event details.
+
+**Events Processed:**
+- **Bounce** - Email delivery failed (hard/soft bounces)
+- **Complaint** - Recipient marked email as spam
+- **Delivery** - Email successfully delivered
+- **Open** - Recipient opened the email
+- **Click** - Recipient clicked a link in the email
+
+### AWS Infrastructure Setup
+
+The SQS consumer requires the following AWS infrastructure:
+
+```
+SES Configuration Set → SNS Topic → SQS Queue
+```
+
+**Existing Infrastructure:**
+- **SES Configuration Set**: `Termisend-config`
+- **SNS Topic**: `termisend-ses-email-events`
+- **SQS Queue**: `Termisend-SES-SNS-Topic`
+
+To set up SES event publishing:
+1. Create an SES Configuration Set with event publishing enabled
+2. Configure the Configuration Set to publish events to an SNS topic
+3. Subscribe an SQS queue to the SNS topic
+4. Configure the SQS queue URL in your environment variables
+
+### Configuration
+
+Add the following to your `.env.development.local` or `.env.production.local`:
+
+```bash
+# SQS Configuration for SES Event Processing
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/Termisend-SES-SNS-Topic
+SQS_POLLING_INTERVAL_MS=10000
+SQS_CONSUMER_ENABLED=true
+```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SQS_QUEUE_URL` | Full URL of the SQS queue | Required |
+| `SQS_POLLING_INTERVAL_MS` | Polling interval in milliseconds | 10000 |
+| `SQS_CONSUMER_ENABLED` | Enable/disable the consumer | true |
+
+### Features
+
+- **Bounce/Complaint Suppression**: Automatically suppress contacts that bounce or complain to protect sender reputation and reduce AWS penalty risk
+- **Delivery Tracking**: Confirm successful email delivery and update contact status in real-time
+- **Engagement Tracking**: Track opens and clicks for campaign analytics
+- **Real-time Analytics**: Events are emitted to the event bus for immediate UI updates
+- **Audit Trail**: All SES events are logged for compliance and debugging
+
+### Database Tables
+
+The SQS consumer uses two database tables:
+
+#### ses_event_tracking
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| message_id | VARCHAR(255) | SES message ID |
+| event_type | VARCHAR(50) | Type of event (bounce, complaint, delivery, etc.) |
+| email | VARCHAR(255) | Recipient email address |
+| event_data | JSONB | Full event payload |
+| created_at | TIMESTAMP | Event timestamp |
+
+#### contact_suppressions
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| email | VARCHAR(255) | Suppressed email address (unique) |
+| reason | VARCHAR(50) | Suppression reason (bounce, complaint) |
+| source | VARCHAR(100) | Source of suppression |
+| created_at | TIMESTAMP | When suppressed |
+
+### Event Processing Flow
+
+1. **SES sends event**: When an email event occurs (bounce, delivery, etc.), SES generates an event
+2. **SNS forwards**: The SES Configuration Set publishes to the SNS topic
+3. **SQS receives**: SNS forwards the notification to the SQS queue
+4. **Consumer polls**: The SQS consumer periodically polls for messages
+5. **Event processing**: Messages are parsed, validated, and routed to handlers
+6. **Database updates**: Handlers update contact status and create event records
+7. **UI notification**: Events are emitted to the event bus for real-time UI updates
+
+### Troubleshooting
+
+**Queue URL not configured**
+- Symptom: SQS consumer doesn't start
+- Solution: Set `SQS_QUEUE_URL` in your environment file
+
+**AWS permissions errors**
+- Symptom: Access denied when polling SQS
+- Solution: Ensure AWS credentials have `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and `sqs:GetQueueAttributes` permissions
+
+**Message parsing errors**
+- Symptom: Errors processing messages from SQS
+- Solution: Verify SNS is configured to send raw message delivery, or check that the message format matches expected SNS notification structure
+
+**Consumer not processing events**
+- Symptom: Events occur in SES but aren't reflected in the application
+- Solution: 
+  - Check that `SQS_CONSUMER_ENABLED=true`
+  - Verify the queue URL is correct and accessible
+  - Ensure the SNS topic is properly subscribed to the SQS queue
+  - Check that the SES Configuration Set is configured to publish to the correct SNS topic
+
 ## Scripts
 
 | Command | Description |

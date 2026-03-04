@@ -10,6 +10,7 @@
 /** @jsxImportSource react */
 import { Box } from 'ink';
 import type React from 'react';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard.js';
 import { Dashboard } from './components/Dashboard.js';
 
 /**
@@ -19,6 +20,7 @@ import { Dashboard } from './components/Dashboard.js';
 export default function App(): React.ReactElement {
   return (
     <Box flexDirection="column" height="100%">
+      <AnalyticsDashboard />
       <Dashboard />
     </Box>
   );

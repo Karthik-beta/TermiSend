@@ -5,9 +5,12 @@
 
 /** @jsxImportSource react */
 import { render } from 'ink';
+import { isSQSConsumerEnabled } from './config.js';
 import { closeConnection, initializeSchema } from './db.js';
 import { domainEvents, registerAllAnalyticsHandlers } from './events/index.js';
+import { logger } from './logger.js';
 import { shutdown } from './shutdown.js';
+import { startConsumer, stopConsumer } from './sqs-consumer.js';
 import App from './ui/index.js';
 
 // ============================================================================
@@ -20,6 +23,22 @@ async function main(): Promise<void> {
 
     // Register analytics event handlers
     registerAllAnalyticsHandlers(domainEvents);
+
+    // Start SQS consumer if enabled
+    if (isSQSConsumerEnabled()) {
+      try {
+        // Start consumer in the background - don't await the infinite loop
+        startConsumer().catch((error) => {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.warn('SQS consumer encountered an error', { error: errorMessage });
+        });
+        await logger.info('SQS consumer started for SES event processing');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        await logger.warn('SQS consumer failed to start', { error: errorMessage });
+        // Continue without SQS consumer - it's optional
+      }
+    }
 
     // Render the Ink UI
     const { waitUntilExit } = render(<App />);
@@ -48,7 +67,7 @@ async function main(): Promise<void> {
 // Handle graceful shutdown
 let isShuttingDown = false;
 
-function handleShutdown(): void {
+async function handleShutdown(): Promise<void> {
   if (isShuttingDown) {
     return;
   }
@@ -57,10 +76,18 @@ function handleShutdown(): void {
   // Set global shutdown flag to stop all loops
   shutdown();
 
+  // Stop SQS consumer gracefully
+  try {
+    await stopConsumer();
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Error stopping SQS consumer: ${errorMessage}`);
+  }
+
   // Force exit after brief grace period (don't wait indefinitely)
   setTimeout(() => {
     process.exit(0);
-  }, 500);
+  }, 3000);
 
   // Attempt graceful cleanup
   closeConnection().catch((error) => {
@@ -72,8 +99,16 @@ function handleShutdown(): void {
   });
 }
 
-process.on('SIGINT', () => handleShutdown());
-process.on('SIGTERM', () => handleShutdown());
+process.on('SIGINT', () => {
+  handleShutdown().catch(() => {
+    // Ignore shutdown errors - process is terminating anyway
+  });
+});
+process.on('SIGTERM', () => {
+  handleShutdown().catch(() => {
+    // Ignore shutdown errors - process is terminating anyway
+  });
+});
 
 // Start the application
 main();

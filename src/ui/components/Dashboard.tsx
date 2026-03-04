@@ -33,16 +33,15 @@ export function Dashboard(): React.ReactElement {
 
   // Get terminal dimensions and calculate responsive layout
   const terminalHeight = stdout.rows;
-  const terminalWidth = stdout.columns;
 
   // Fixed element heights - ultra compact
-  const HEADER_HEIGHT = 2; // Minimal header
-  const STATUS_BAR_HEIGHT = 1; // Status bar height
-  const MARGINS = 0; // No margins
+  const HeaderHeight = 2; // Minimal header
+  const StatusBarHeight = 1; // Status bar height
+  const Margins = 0; // No margins
 
   // Calculate available height for content
   const availableHeight = useMemo(
-    () => Math.max(10, terminalHeight - HEADER_HEIGHT - STATUS_BAR_HEIGHT - MARGINS),
+    () => Math.max(10, terminalHeight - HeaderHeight - StatusBarHeight - Margins),
     [terminalHeight]
   );
 
@@ -75,10 +74,12 @@ export function Dashboard(): React.ReactElement {
 
   // Handle global keyboard shortcuts
   useInput((input, key) => {
-    // Global quit shortcut
+    // Global quit shortcut - force immediate exit
     if (input === 'q' || input === 'Q') {
       shutdown(); // Signal campaign to stop first
-      exit();
+      exit(); // Signal Ink to unmount
+      // Force immediate exit - bypass event loop that may be blocked by async operations
+      process.exit(0);
     }
 
     // Navigation shortcuts
@@ -109,7 +110,12 @@ export function Dashboard(): React.ReactElement {
     switch (view) {
       case 'MENU':
         return (
-          <Panel title="Welcome" borderColor={colors.primary} flexGrow={1} minHeight={contentHeight - 2}>
+          <Panel
+            title="Welcome"
+            borderColor={colors.primary}
+            flexGrow={1}
+            minHeight={contentHeight - 2}
+          >
             <Box flexDirection="column" gap={1}>
               <Text>
                 Welcome to <Text bold={true}>TermiSend</Text> - Email Outreach Dashboard

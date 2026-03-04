@@ -23,12 +23,53 @@ export interface Contact {
  * Send log status values
  * Tracks the outcome of each send attempt
  */
-export type LogStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+export type LogStatus =
+  | 'pending'
+  | 'sent'
+  | 'failed'
+  | 'skipped'
+  | 'delivered'
+  | 'bounced'
+  | 'complained';
 
 /**
  * Send mode for campaign execution
  */
 export type SendMode = 'production' | 'test' | 'dry_run';
+
+// ============================================================================
+// Failure Classification Types for Retry Logic
+// ============================================================================
+
+/**
+ * Type of failure - determines retry behavior
+ * - permanent: Never retry (config errors, invalid email, etc.)
+ * - transient: Retry with delays (API errors, network timeouts, etc.)
+ */
+export type FailureType = 'permanent' | 'transient';
+
+/**
+ * Classification of a failure for retry logic
+ */
+export interface FailureClassification {
+  /** Type of failure */
+  type: FailureType;
+  /** Whether this failure should be retried */
+  retryable: boolean;
+  /** If true, stop the entire campaign (for critical config errors) */
+  stopCampaign?: boolean;
+}
+
+/** Maximum number of retry attempts for transient failures */
+export const MAX_RETRIES = 2;
+
+/** Delay in milliseconds for retry attempts */
+export const RETRY_DELAYS = {
+  /** First retry: wait 2 seconds */
+  1: 2000,
+  /** Second retry: wait 5 seconds */
+  2: 5000,
+} as const;
 
 /**
  * Represents a send log entry in the database
@@ -46,6 +87,7 @@ export interface SendLog {
   messageId?: string; // SES message ID
   sentAt?: Date; // When actually sent
   createdAt: Date; // When log entry created
+  retryCount: number; // Number of retry attempts (0 = first attempt)
 }
 
 /**
@@ -485,4 +527,356 @@ export interface SyncResult {
   identityStatusesStored: number;
   /** Error message if sync failed */
   error?: string;
+}
+
+// ============================================================================
+// SES Event Types (SQS Consumer)
+// ============================================================================
+
+/**
+ * SES event type identifiers
+ */
+export type SESEventType =
+  | 'Bounce'
+  | 'Complaint'
+  | 'Delivery'
+  | 'Open'
+  | 'Click'
+  | 'Send'
+  | 'Reject'
+  | 'RenderingFailure';
+
+/**
+ * SNS notification message structure
+ * Wraps SES events published through SNS to SQS
+ * @see https://docs.aws.amazon.com/sns/latest/dg/sns-message-and-json-formats.html
+ */
+export interface SNSNotification {
+  /** Message type (typically 'Notification') */
+  Type: 'Notification' | 'SubscriptionConfirmation' | 'UnsubscribeConfirmation';
+  /** SNS message ID */
+  MessageId: string;
+  /** ARN of the topic that published the message */
+  TopicArn: string;
+  /** Subject of the notification (if set) */
+  Subject?: string;
+  /** JSON-encoded SES event payload */
+  Message: string;
+  /** Timestamp of the notification */
+  Timestamp: string;
+  /** Signature version used for verification */
+  SignatureVersion: string;
+  /** Signature for message verification */
+  Signature: string;
+  /** Certificate URL for signature verification */
+  SigningCertURL: string;
+  /** Unsubscribe URL (not used in this context) */
+  UnsubscribeURL?: string;
+}
+
+/**
+ * Email header structure
+ */
+export interface SESHeader {
+  name: string;
+  value: string;
+}
+
+/**
+ * Common headers extracted from email
+ */
+export interface SESCommonHeaders {
+  from?: string[];
+  to?: string[];
+  messageId?: string;
+  subject?: string;
+  date?: string;
+}
+
+/**
+ * Common mail data present in all SES events
+ */
+export interface SESMailData {
+  /** Timestamp when the message was sent */
+  timestamp: string;
+  /** SES message ID (maps to send_logs.message_id) */
+  messageId: string;
+  /** Source email address */
+  source: string;
+  /** Source ARN (if sending through configuration set) */
+  sourceArn?: string;
+  /** Sending account ID */
+  sendingAccountId: string;
+  /** Recipients of the message */
+  destination: string[];
+  /** Headers from the message */
+  headers?: SESHeader[];
+  /** Common headers extracted for convenience */
+  commonHeaders?: SESCommonHeaders;
+}
+
+/**
+ * Bounced recipient details
+ */
+export interface SESBouncedRecipient {
+  /** Email address that bounced */
+  emailAddress: string;
+  /** Bounce action (failed, delayed, etc.) */
+  action?: string;
+  /** Status code from remote MTA */
+  status?: string;
+  /** Diagnostic code explaining the bounce */
+  diagnosticCode?: string;
+}
+
+/**
+ * Bounce event data
+ * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-bounce
+ */
+export interface SESBounceData {
+  /** Bounce type: 'Permanent' or 'Transient' */
+  bounceType: 'Permanent' | 'Transient';
+  /** Bounce subtype providing additional detail */
+  bounceSubType: string;
+  /** Array of bounced recipients */
+  bouncedRecipients: SESBouncedRecipient[];
+  /** Timestamp of bounce */
+  timestamp: string;
+  /** Feedback ID from remote MTA */
+  feedbackId: string;
+  /** Reporting MTA */
+  reportingMTA?: string;
+}
+
+/**
+ * Complained recipient details
+ */
+export interface SESComplainedRecipient {
+  /** Email address that complained */
+  emailAddress: string;
+}
+
+/**
+ * Complaint event data
+ * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-complaint
+ */
+export interface SESComplaintData {
+  /** Complaint feedback type */
+  complaintFeedbackType?: 'abuse' | 'auth-failure' | 'fraud' | 'not-spam' | 'other' | 'virus';
+  /** Array of recipients who complained */
+  complainedRecipients: SESComplainedRecipient[];
+  /** Timestamp of complaint */
+  timestamp: string;
+  /** Feedback ID from ISP */
+  feedbackId: string;
+  /** User agent string from complaint */
+  userAgent?: string;
+  /** Original mail that caused complaint */
+  arrivalDate?: string;
+}
+
+/**
+ * Delivery event data
+ * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-delivery
+ */
+export interface SESDeliveryData {
+  /** Timestamp of delivery */
+  timestamp: string;
+  /** Time in milliseconds to process delivery */
+  processingTimeMillis: number;
+  /** Recipients who were delivered to */
+  recipients: string[];
+  /** SMTP response from remote MTA */
+  smtpResponse: string;
+  /** Reporting MTA */
+  reportingMTA?: string;
+}
+
+/**
+ * Open event data
+ * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-open
+ */
+export interface SESOpenData {
+  /** IP address of opener */
+  ipAddress: string;
+  /** Timestamp of open event */
+  timestamp: string;
+  /** User agent of email client */
+  userAgent: string;
+}
+
+/**
+ * Click event data
+ * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-click
+ */
+export interface SESClickData {
+  /** IP address of clicker */
+  ipAddress: string;
+  /** Timestamp of click event */
+  timestamp: string;
+  /** User agent of email client */
+  userAgent: string;
+  /** Link that was clicked */
+  link: string;
+  /** Link tags from tracking */
+  linkTags?: Record<string, string[]>;
+}
+
+/**
+ * Send event data
+ */
+export interface SESSendData {
+  /** Indicates successful sending */
+  success: boolean;
+}
+
+/**
+ * Reject event data
+ */
+export interface SESRejectData {
+  /** Reason for rejection */
+  reason: string;
+}
+
+/**
+ * Failure event data
+ */
+export interface SESFailureData {
+  /** Error message */
+  errorMessage: string;
+  /** Error type */
+  errorType: string;
+}
+
+/**
+ * SES event record structure within SNS message
+ * Contains the actual SES event data after JSON parsing
+ */
+export interface SESEventRecord {
+  /** Event type identifier */
+  eventType: SESEventType;
+  /** Event timestamp in ISO 8601 format */
+  eventTime: string;
+  /** Email sending details */
+  mail: SESMailData;
+  /** Event-specific details (bounce, complaint, delivery, etc.) */
+  bounce?: SESBounceData;
+  complaint?: SESComplaintData;
+  delivery?: SESDeliveryData;
+  open?: SESOpenData;
+  click?: SESClickData;
+  send?: SESSendData;
+  reject?: SESRejectData;
+  failure?: SESFailureData;
+}
+
+/**
+ * Parsed SES event with extracted data
+ */
+export interface ParsedSESEvent {
+  /** Unique event ID (derived from SNS MessageId) */
+  eventId: string;
+  /** Event type */
+  eventType: SESEventType;
+  /** When the event occurred */
+  timestamp: Date;
+  /** SES message ID (maps to send_logs) */
+  messageId: string;
+  /** Recipient email addresses */
+  recipients: string[];
+  /** Sender email address */
+  source: string;
+  /** Event-specific data */
+  data:
+    | SESBounceData
+    | SESComplaintData
+    | SESDeliveryData
+    | SESOpenData
+    | SESClickData
+    | SESSendData
+    | SESRejectData
+    | SESFailureData;
+  /** Original full event record */
+  rawEvent: SESEventRecord;
+}
+
+/**
+ * SQS Consumer configuration options
+ */
+export interface SQSConsumerConfig {
+  /** SQS queue URL to poll */
+  queueUrl: string;
+  /** AWS region */
+  region: string;
+  /** AWS credentials */
+  credentials: {
+    accessKeyId: string;
+    secretAccessKey: string;
+  };
+  /** Polling interval in milliseconds (default: 10000) */
+  pollingIntervalMs: number;
+  /** Maximum number of messages to receive per poll (1-10, default: 10) */
+  maxMessagesPerPoll: number;
+  /** Visibility timeout in seconds (default: 300) */
+  visibilityTimeoutSeconds: number;
+  /** Wait time for long polling in seconds (0-20, default: 20) */
+  waitTimeSeconds: number;
+  /** Maximum receive attempts before sending to DLQ (default: 3) */
+  maxReceiveCount: number;
+  /** Whether to delete messages immediately after processing (default: true) */
+  autoDelete: boolean;
+  /** Whether to enable debug logging (default: false) */
+  debugLogging: boolean;
+}
+
+/**
+ * SQS message wrapper structure
+ */
+export interface SQSMessage {
+  /** SQS message ID */
+  messageId: string;
+  /** Receipt handle for deletion/visibility */
+  receiptHandle: string;
+  /** Message body (JSON string containing SNS notification) */
+  body: string;
+  /** Message attributes */
+  attributes?: Record<string, string>;
+  /** Custom message attributes */
+  messageAttributes?: Record<string, { stringValue?: string; dataType: string }>;
+  /** Number of times this message has been received */
+  receiveCount?: number;
+  /** First receive timestamp */
+  sentTimestamp?: string;
+}
+
+/**
+ * SQS consumer status
+ */
+export interface SQSConsumerStatus {
+  /** Whether consumer is currently running */
+  isRunning: boolean;
+  /** Number of messages processed */
+  messagesProcessed: number;
+  /** Number of messages failed */
+  messagesFailed: number;
+  /** Last poll timestamp */
+  lastPollAt?: Date;
+  /** Last error message */
+  lastError?: string;
+  /** Current number of in-flight messages */
+  inFlightCount: number;
+}
+
+/**
+ * Event processing result
+ */
+export interface EventProcessingResult {
+  /** Whether processing was successful */
+  success: boolean;
+  /** Error message if failed */
+  error?: string;
+  /** IDs of affected contacts */
+  affectedContactIds: string[];
+  /** IDs of updated send logs */
+  updatedSendLogIds: string[];
 }

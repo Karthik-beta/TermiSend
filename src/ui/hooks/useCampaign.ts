@@ -20,7 +20,6 @@ import type { CampaignViewStatus, LiveProgress, LogEntry } from '../types.js';
 interface UseCampaignReturn {
   // State
   status: CampaignViewStatus;
-  templatePath: string;
   campaignId: string;
   isContinuous: boolean;
   pendingCount: number;
@@ -31,7 +30,6 @@ interface UseCampaignReturn {
   logEntries: LogEntry[];
 
   // Actions
-  setTemplatePath: (path: string) => void;
   setCampaignId: (id: string) => void;
   setIsContinuous: (continuous: boolean) => void;
   loadPendingCount: () => Promise<void>;
@@ -49,7 +47,6 @@ interface UseCampaignReturn {
 export function useCampaign(): UseCampaignReturn {
   // Campaign state
   const [status, setStatus] = useState<CampaignViewStatus>('idle');
-  const [templatePath, setTemplatePathState] = useState<string>('');
   const [campaignId, setCampaignId] = useState<string>(crypto.randomUUID());
   const [isContinuous, setIsContinuous] = useState<boolean>(true); // Default to continuous based on user request
   const [pendingCount, setPendingCount] = useState<number>(0);
@@ -70,10 +67,6 @@ export function useCampaign(): UseCampaignReturn {
   // Queue for pending log entries to prevent race conditions during rapid updates
   const pendingLogEntriesRef = useRef<LogEntry[]>([]);
 
-  const setTemplatePath = useCallback((path: string) => {
-    setTemplatePathState(path);
-  }, []);
-
   const loadPendingCount = useCallback(async () => {
     try {
       const count = await getEligibleContactCount(campaignId);
@@ -84,12 +77,6 @@ export function useCampaign(): UseCampaignReturn {
   }, [campaignId]);
 
   const generateCampaignPreview = useCallback(async () => {
-    if (!templatePath.trim()) {
-      setError('Please enter a template path');
-      setStatus('error');
-      return;
-    }
-
     setStatus('loading');
     setError(null);
     setPreview(null);
@@ -103,7 +90,7 @@ export function useCampaign(): UseCampaignReturn {
       }
 
       const sampleContact: Contact = contacts[0];
-      const previewResult = await generatePreview(templatePath.trim(), sampleContact);
+      const previewResult = await generatePreview(sampleContact);
       setPreview({
         subject: previewResult.subject,
         textBody: previewResult.textBody,
@@ -114,7 +101,7 @@ export function useCampaign(): UseCampaignReturn {
       setError(errorMessage);
       setStatus('error');
     }
-  }, [templatePath, campaignId]);
+  }, [campaignId]);
 
   const startCampaign = useCallback(async () => {
     // Check if shutdown was requested before starting
@@ -134,7 +121,6 @@ export function useCampaign(): UseCampaignReturn {
 
     try {
       const campaignResult = await runCampaign(
-        templatePath.trim(),
         false,
         (progress: SendProgress) => {
           // Update live progress state
@@ -186,7 +172,7 @@ export function useCampaign(): UseCampaignReturn {
       setError(errorMessage);
       setStatus('error');
     }
-  }, [templatePath, campaignId, isContinuous]);
+  }, [campaignId, isContinuous]);
 
   const confirmCampaign = useCallback(
     async (confirmed: boolean) => {
@@ -208,7 +194,6 @@ export function useCampaign(): UseCampaignReturn {
 
   const reset = useCallback(() => {
     setStatus('idle');
-    setTemplatePathState('');
     setPendingCount(0);
     setResult(null);
     setError(null);
@@ -230,7 +215,6 @@ export function useCampaign(): UseCampaignReturn {
   return {
     // State
     status,
-    templatePath,
     campaignId,
     isContinuous,
     pendingCount,
@@ -241,7 +225,6 @@ export function useCampaign(): UseCampaignReturn {
     logEntries,
 
     // Actions
-    setTemplatePath,
     setCampaignId,
     setIsContinuous,
     loadPendingCount,

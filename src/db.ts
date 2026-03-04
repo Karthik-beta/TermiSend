@@ -165,18 +165,51 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)
     `;
 
+    // Create campaigns table first (referenced by send_logs and analytics_events)
+    await sql`
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        subject_template VARCHAR(500) NOT NULL,
+        body_template TEXT NOT NULL,
+        from_email VARCHAR(255) NOT NULL,
+        from_name VARCHAR(255),
+        status VARCHAR(50) NOT NULL DEFAULT 'draft',
+        scheduled_at TIMESTAMP WITH TIME ZONE,
+        started_at TIMESTAMP WITH TIME ZONE,
+        completed_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create indexes for campaigns
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at)
+    `;
+
     // Create send_logs table for tracking email send attempts
     await sql`
       CREATE TABLE IF NOT EXISTS send_logs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-        campaign_id UUID,
+        campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL DEFAULT 'pending',
         mode VARCHAR(50) NOT NULL DEFAULT 'production',
         subject VARCHAR(500) NOT NULL,
         body_preview VARCHAR(500) NOT NULL,
         error_reason TEXT,
         message_id VARCHAR(255),
+        retry_count INTEGER DEFAULT 0,
+        open_count INTEGER DEFAULT 0,
+        click_count INTEGER DEFAULT 0,
+        first_opened_at TIMESTAMP WITH TIME ZONE,
+        first_clicked_at TIMESTAMP WITH TIME ZONE,
+        delivery_confirmed_at TIMESTAMP WITH TIME ZONE,
         sent_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -194,6 +227,9 @@ export async function initializeSchema(): Promise<void> {
     `;
     await sql`
       CREATE INDEX IF NOT EXISTS idx_send_logs_campaign_id ON send_logs(campaign_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_send_logs_retry_count ON send_logs(retry_count)
     `;
 
     // Create audit_logs table
@@ -295,6 +331,63 @@ export async function initializeSchema(): Promise<void> {
       )
     `;
 
+    // ============================================================================
+    // SES Event Tracking Tables (SQS Consumer)
+    // ============================================================================
+
+    // Create ses_event_tracking table for detailed SES event log
+    await sql`
+      CREATE TABLE IF NOT EXISTS ses_event_tracking (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_type VARCHAR(50) NOT NULL,
+        sns_message_id VARCHAR(100) NOT NULL UNIQUE,
+        ses_message_id VARCHAR(255) NOT NULL,
+        contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+        send_log_id UUID REFERENCES send_logs(id) ON DELETE SET NULL,
+        recipient_email VARCHAR(255),
+        source_email VARCHAR(255),
+        event_data JSONB NOT NULL DEFAULT '{}',
+        occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Indexes for ses_event_tracking
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_event_tracking_event_type ON ses_event_tracking(event_type)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_event_tracking_ses_message_id ON ses_event_tracking(ses_message_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_event_tracking_contact_id ON ses_event_tracking(contact_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ses_event_tracking_occurred_at ON ses_event_tracking(occurred_at)
+    `;
+
+    // Create contact_suppressions table for bounce/complaint tracking
+    await sql`
+      CREATE TABLE IF NOT EXISTS contact_suppressions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        suppression_type VARCHAR(50) NOT NULL,
+        suppression_reason VARCHAR(255) NOT NULL,
+        ses_message_id VARCHAR(255),
+        original_event_data JSONB DEFAULT '{}',
+        suppressed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(contact_id, suppression_type)
+      )
+    `;
+
+    // Indexes for contact_suppressions
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_contact_suppressions_contact_id ON contact_suppressions(contact_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_contact_suppressions_type ON contact_suppressions(suppression_type)
+    `;
+
     // Create indexes on message_events for common query patterns
     await sql`
       CREATE INDEX IF NOT EXISTS idx_ses_message_events_event_type ON ses_message_events(event_type)
@@ -322,7 +415,7 @@ export async function initializeSchema(): Promise<void> {
         correlation_id VARCHAR(100),
         contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
         send_log_id UUID REFERENCES send_logs(id) ON DELETE SET NULL,
-        campaign_id UUID,
+        campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL,
         payload JSONB NOT NULL,
         occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -341,6 +434,9 @@ export async function initializeSchema(): Promise<void> {
     `;
     await sql`
       CREATE INDEX IF NOT EXISTS idx_analytics_events_correlation_id ON analytics_events(correlation_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_campaign_id ON analytics_events(campaign_id)
     `;
 
     // Create verification_metrics table
@@ -367,7 +463,7 @@ export async function initializeSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS send_outcome_metrics (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         date DATE NOT NULL,
-        campaign_id UUID,
+        campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL,
         total_requested INTEGER NOT NULL DEFAULT 0,
         successfully_sent INTEGER NOT NULL DEFAULT 0,
         failed_sends INTEGER NOT NULL DEFAULT 0,
@@ -413,7 +509,7 @@ export async function initializeSchema(): Promise<void> {
         date DATE NOT NULL,
         total_delays INTEGER NOT NULL DEFAULT 0,
         total_delay_time_ms BIGINT NOT NULL DEFAULT 0,
-        average_delay_ms DECIMAL(10,2),
+        average_delay_ms DECIMAL(10,2) DEFAULT 0,
         quota_checks_passed INTEGER NOT NULL DEFAULT 0,
         quota_checks_failed INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -496,6 +592,8 @@ export async function getContacts(): Promise<Contact[]> {
  * A contact is eligible if:
  * 1. It has no successful 'sent' log entry for the specified campaign (or any if campaignId is null)
  * 2. It has no 'CONTACT_INVALID' or 'CONTACT_DEEMED_UNSAFE' events in analytics
+ * 3. It has no failed log entry with retry_count >= 2 (max retries reached)
+ * 4. Failed entries with retry_count < 2 ARE eligible for retry
  *
  * @param campaignId - Optional campaign ID to filter by
  * @param limit - Maximum number of contacts to return (default: 1000)
@@ -518,6 +616,13 @@ export async function getEligibleContacts(
       AND sl.status = 'sent'
       AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
+    AND NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'failed'
+      AND sl.retry_count >= 2
+      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
+    )
     ORDER BY c.created_at ASC
     LIMIT ${limit}
   `;
@@ -525,6 +630,10 @@ export async function getEligibleContacts(
 
 /**
  * Get count of eligible contacts for sending
+ * A contact is eligible if:
+ * 1. It has no successful 'sent' log entry for the specified campaign
+ * 2. It has no 'CONTACT_INVALID' or 'CONTACT_DEEMED_UNSAFE' events in analytics
+ * 3. It has no failed log entry with retry_count >= 2 (max retries reached)
  * @param campaignId - Optional campaign ID to filter by
  */
 export async function getEligibleContactCount(campaignId: string | null = null): Promise<number> {
@@ -539,6 +648,13 @@ export async function getEligibleContactCount(campaignId: string | null = null):
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'sent'
+      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'failed'
+      AND sl.retry_count >= 2
       AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
   `;
@@ -567,11 +683,12 @@ export async function createSendLog(
   mode: SendMode,
   subject: string,
   bodyPreview: string,
-  campaignId?: string
+  campaignId?: string,
+  retryCount: number = 0
 ): Promise<SendLog> {
   const [log] = await sql<SendLog[]>`
-    INSERT INTO send_logs (contact_id, campaign_id, status, mode, subject, body_preview)
-    VALUES (${contactId}, ${campaignId ?? null}, 'pending', ${mode}, ${subject}, ${bodyPreview})
+    INSERT INTO send_logs (contact_id, campaign_id, status, mode, subject, body_preview, retry_count)
+    VALUES (${contactId}, ${campaignId ?? null}, 'pending', ${mode}, ${subject}, ${bodyPreview}, ${retryCount})
     RETURNING *
   `;
   return log;
@@ -587,6 +704,7 @@ export async function updateSendLog(
     messageId?: string;
     errorReason?: string;
     sentAt?: Date;
+    retryCount?: number;
   }
 ): Promise<SendLog> {
   const [log] = await sql<SendLog[]>`
@@ -595,7 +713,24 @@ export async function updateSendLog(
       status = ${updates.status},
       message_id = ${updates.messageId ?? null},
       error_reason = ${updates.errorReason ?? null},
-      sent_at = ${updates.sentAt ?? null}
+      sent_at = ${updates.sentAt ?? null},
+      retry_count = ${updates.retryCount ?? null}
+    WHERE id = ${logId}
+    RETURNING *
+  `;
+  return log;
+}
+
+/**
+ * Increment the retry count for a send log
+ * Used when retrying a failed send attempt
+ * @param logId - The send log ID to update
+ * @returns The updated send log
+ */
+export async function incrementRetryCount(logId: string): Promise<SendLog> {
+  const [log] = await sql<SendLog[]>`
+    UPDATE send_logs
+    SET retry_count = COALESCE(retry_count, 0) + 1
     WHERE id = ${logId}
     RETURNING *
   `;
@@ -677,6 +812,47 @@ export async function getSendStats(): Promise<SendStats> {
     pendingSends: pendingResult?.count ?? 0,
     sentLast24Hours: sent24hResult?.count ?? 0,
     failedLast24Hours: failed24hResult?.count ?? 0,
+  };
+}
+
+/**
+ * Get analytics counts for real-time dashboard
+ * Returns aggregate counts for contacts by status
+n */
+export async function getAnalyticsCounts(): Promise<{
+  total: number;
+  pending: number;
+  verified: number;
+  sent: number;
+  failed: number;
+  invalid: number;
+}> {
+  const result = await sql<
+    {
+      total: number;
+      pending: number;
+      verified: number;
+      sent: number;
+      failed: number;
+      invalid: number;
+    }[]
+  >`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END) as verified,
+      SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+      SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) as invalid
+    FROM contacts
+  `;
+  return {
+    total: Number(result[0]?.total ?? 0),
+    pending: Number(result[0]?.pending ?? 0),
+    verified: Number(result[0]?.verified ?? 0),
+    sent: Number(result[0]?.sent ?? 0),
+    failed: Number(result[0]?.failed ?? 0),
+    invalid: Number(result[0]?.invalid ?? 0),
   };
 }
 
@@ -865,20 +1041,57 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
   console.warn('⚠️  This action cannot be undone!\n');
 
   try {
+    // List of all tables that should be reset
+    // IMPORTANT: When new tables are added to the database schema, they must be
+    // added to this list to ensure complete database resets.
+    const expectedTables = [
+      'contacts',
+      'send_logs',
+      'audit_logs',
+      'email_verifier_credits',
+      'ses_quota_snapshots',
+      'ses_send_statistics',
+      'ses_identity_status',
+      'ses_message_events',
+      'ses_event_tracking',
+      'contact_suppressions',
+      'analytics_events',
+      'verification_metrics',
+      'send_outcome_metrics',
+      'ses_api_metrics',
+      'throttling_metrics',
+    ];
+
+    // Query which tables actually exist in the database
+    const existingTables = await sql<{ table_name: string }[]>`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_name IN ${sql(expectedTables)}
+    `;
+
+    const existingTableNames = existingTables
+      .map((t) => t.table_name)
+      .filter((name): name is string => typeof name === 'string' && name.length > 0);
+
+    if (existingTableNames.length === 0) {
+      // No tables exist yet - schema needs to be initialized
+      return {
+        success: true,
+        message: `Database '${dbName}' has no tables to reset. Run initializeSchema() first if needed.`,
+      };
+    }
+
     // Execute truncate with CASCADE to handle any foreign key references
     // RESTART IDENTITY resets auto-increment sequences
-    //
-    // IMPORTANT: When new tables are added to the database schema, they must be
-    // added to this TRUNCATE list to ensure complete database resets.
-    await sql`
-      TRUNCATE TABLE contacts, send_logs, audit_logs, email_verifier_credits,
-                   ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events
-      RESTART IDENTITY CASCADE
-    `;
+    // Only truncate tables that actually exist
+    // Properly quote table names to handle reserved keywords and special characters
+    const quotedTables = existingTableNames.map((name) => `"${name}"`).join(', ');
+    await sql.unsafe(`TRUNCATE TABLE ${quotedTables} RESTART IDENTITY CASCADE`);
 
     return {
       success: true,
-      message: `Database '${dbName}' reset successfully. All data deleted.`,
+      message: `Database '${dbName}' reset successfully. ${existingTableNames.length} table(s) cleared: ${existingTableNames.join(', ')}`,
     };
   } catch (error) {
     throw new Error(
@@ -1312,6 +1525,370 @@ export async function getMessageEvents(options: GetMessageEventsOptions = {}): P
 // ============================================================================
 // Standalone initialization (for CLI usage)
 // ============================================================================
+
+// ============================================================================
+// SES Event Tracking Functions (SQS Consumer)
+// ============================================================================
+
+/**
+ * Create SES event tracking record
+ * Logs all incoming SES events for audit trail
+ * @param eventData - Event tracking data
+ */
+export async function createSESEventTracking(eventData: {
+  eventType: string;
+  snsMessageId: string;
+  sesMessageId: string;
+  contactId?: string;
+  sendLogId?: string;
+  recipientEmail?: string;
+  sourceEmail?: string;
+  eventData: Record<string, unknown>;
+  occurredAt: Date;
+}): Promise<void> {
+  try {
+    const serializedData = serializeEventData(eventData.eventData);
+    await sql`
+      INSERT INTO ses_event_tracking (
+        event_type, sns_message_id, ses_message_id, contact_id, send_log_id,
+        recipient_email, source_email, event_data, occurred_at
+      ) 
+      SELECT 
+        ${eventData.eventType}, ${eventData.snsMessageId}, ${eventData.sesMessageId},
+        ${eventData.contactId ?? null}, ${eventData.sendLogId ?? null},
+        ${eventData.recipientEmail ?? null}, ${eventData.sourceEmail ?? null},
+        ${sql.json(serializedData)}, ${eventData.occurredAt}
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ses_event_tracking WHERE sns_message_id = ${eventData.snsMessageId}
+      )
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to create SES event tracking: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - event tracking failures should not block processing
+  }
+}
+
+/**
+ * Create contact suppression record
+ * Prevents future sends to suppressed contacts
+ * @param suppressionData - Suppression details
+ */
+export async function createContactSuppression(suppressionData: {
+  contactId: string;
+  suppressionType: 'bounce' | 'complaint' | 'manual';
+  suppressionReason: string;
+  sesMessageId?: string;
+  originalEventData?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const serializedData = suppressionData.originalEventData
+      ? serializeEventData(suppressionData.originalEventData)
+      : {};
+    await sql`
+      INSERT INTO contact_suppressions (
+        contact_id, suppression_type, suppression_reason, ses_message_id, original_event_data
+      ) VALUES (
+        ${suppressionData.contactId}, ${suppressionData.suppressionType},
+        ${suppressionData.suppressionReason}, ${suppressionData.sesMessageId ?? null},
+        ${sql.json(serializedData)}
+      )
+      ON CONFLICT (contact_id, suppression_type) DO NOTHING
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to create contact suppression: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - suppression failures should not block processing
+  }
+}
+
+/**
+ * Check if a contact is suppressed
+ * @param contactId - Contact ID to check
+ * @returns Suppression record or null if not suppressed
+ */
+export async function getContactSuppression(contactId: string): Promise<{
+  id: string;
+  suppressionType: string;
+  suppressionReason: string;
+  suppressedAt: Date;
+} | null> {
+  const [record] = await sql<
+    {
+      id: string;
+      suppressionType: string;
+      suppressionReason: string;
+      suppressedAt: Date;
+    }[]
+  >`
+    SELECT id, suppression_type as "suppressionType", suppression_reason as "suppressionReason",
+           suppressed_at as "suppressedAt"
+    FROM contact_suppressions
+    WHERE contact_id = ${contactId}
+    LIMIT 1
+  `;
+  return record || null;
+}
+
+/**
+ * Check if a contact is suppressed (alias for getContactSuppression)
+ * @param contactId - Contact ID to check
+ * @returns Boolean indicating if contact is suppressed
+ */
+export async function isContactSuppressed(contactId: string): Promise<boolean> {
+  const suppression = await getContactSuppression(contactId);
+  return suppression !== null;
+}
+
+/**
+ * Find send log by SES message ID
+ * @param messageId - SES message ID
+ * @returns Send log record or null
+ */
+export async function getSendLogByMessageId(messageId: string): Promise<{
+  id: string;
+  contactId: string;
+  status: string;
+  messageId: string;
+} | null> {
+  const [record] = await sql<
+    {
+      id: string;
+      contactId: string;
+      status: string;
+      messageId: string;
+    }[]
+  >`
+    SELECT id, contact_id as "contactId", status, message_id as "messageId"
+    FROM send_logs
+    WHERE message_id = ${messageId}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  return record || null;
+}
+
+/**
+ * Update send log status with SES event tracking
+ * @param sendLogId - Send log ID
+ * @param status - New status
+ * @param eventData - Additional event data to store
+ */
+export async function updateSendLogStatus(
+  sendLogId: string,
+  status: 'delivered' | 'bounced' | 'complained',
+  _eventData: Record<string, unknown>
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET status = ${status}
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to update send log status: ${error instanceof Error ? error.message : String(error)}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Update send log with delivery confirmation
+ * @param sendLogId - Send log ID
+ * @param confirmedAt - Confirmation timestamp
+ */
+export async function confirmSendLogDelivery(sendLogId: string, confirmedAt: Date): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET status = 'delivered',
+          delivery_confirmed_at = ${confirmedAt}
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to confirm send log delivery: ${error instanceof Error ? error.message : String(error)}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Increment send log open count
+ * @param sendLogId - Send log ID
+ * @param firstOpenAt - Timestamp of first open
+ */
+export async function incrementSendLogOpens(sendLogId: string, firstOpenAt: Date): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET open_count = COALESCE(open_count, 0) + 1,
+          first_opened_at = COALESCE(first_opened_at, ${firstOpenAt})
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to increment send log opens: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - engagement tracking failures should not block processing
+  }
+}
+
+/**
+ * Increment send log click count
+ * @param sendLogId - Send log ID
+ * @param clickData - Click event data
+ */
+export async function incrementSendLogClicks(
+  sendLogId: string,
+  clickData: { timestamp: Date; link: string }
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET click_count = COALESCE(click_count, 0) + 1,
+          first_clicked_at = COALESCE(first_clicked_at, ${clickData.timestamp})
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to increment send log clicks: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - engagement tracking failures should not block processing
+  }
+}
+
+/**
+ * Update send log status with bounce tracking
+ * @param sendLogId - Send log ID
+ * @param bounceType - 'Permanent' or 'Transient'
+ * @param bounceData - Full bounce details
+ */
+export async function updateSendLogBounced(
+  sendLogId: string,
+  bounceType: 'Permanent' | 'Transient',
+  _bounceData: Record<string, unknown>
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET status = 'bounced',
+          error_reason = ${`Bounce: ${bounceType}`}
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to update send log bounced: ${error instanceof Error ? error.message : String(error)}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Update send log status with complaint tracking
+ * @param sendLogId - Send log ID
+ * @param complaintData - Complaint details
+ */
+export async function updateSendLogComplained(
+  sendLogId: string,
+  complaintData: Record<string, unknown>
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE send_logs
+      SET status = 'complained',
+          error_reason = ${`Complaint: ${complaintData.complaintFeedbackType || 'unknown'}`}
+      WHERE id = ${sendLogId}
+    `;
+  } catch (error) {
+    logger.warn(
+      `Failed to update send log complained: ${error instanceof Error ? error.message : String(error)}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Suppress contact from future sends due to bounce/complaint
+ * Creates contact_suppressions record for suppression
+ * @param contactId - Contact ID to suppress
+ * @param reason - Suppression reason
+ * @param eventType - Type of event causing suppression
+ */
+export async function suppressContact(
+  contactId: string,
+  reason: string,
+  eventType: 'bounce' | 'complaint'
+): Promise<void> {
+  await createContactSuppression({
+    contactId,
+    suppressionType: eventType,
+    suppressionReason: reason,
+  });
+}
+
+/**
+ * Record engagement event (open/click) to analytics
+ * @param sendLogId - Send log ID
+ * @param contactId - Contact ID
+ * @param eventType - 'open' or 'click'
+ * @param eventData - Event details (IP, user agent, link, etc.)
+ */
+export async function recordEngagementEvent(
+  sendLogId: string,
+  _contactId: string,
+  eventType: 'open' | 'click',
+  eventData: Record<string, unknown>
+): Promise<void> {
+  try {
+    if (eventType === 'open') {
+      await incrementSendLogOpens(sendLogId, eventData.timestamp as Date);
+    } else if (eventType === 'click') {
+      await incrementSendLogClicks(sendLogId, {
+        timestamp: eventData.timestamp as Date,
+        link: eventData.link as string,
+      });
+    }
+  } catch (error) {
+    logger.warn(
+      `Failed to record engagement event: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - engagement tracking failures should not block processing
+  }
+}
+
+/**
+ * Update send log engagement (alias for recordEngagementEvent)
+ * @param sendLogId - Send log ID
+ * @param engagementType - 'open' or 'click'
+ * @param timestamp - Event timestamp
+ * @param metadata - Additional metadata (link, ip, userAgent, etc.)
+ */
+export async function updateSendLogEngagement(
+  sendLogId: string,
+  engagementType: 'open' | 'click',
+  timestamp: Date,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  try {
+    if (engagementType === 'open') {
+      await incrementSendLogOpens(sendLogId, timestamp);
+    } else if (engagementType === 'click') {
+      await incrementSendLogClicks(sendLogId, {
+        timestamp,
+        link: (metadata?.link as string) || '',
+      });
+    }
+  } catch (error) {
+    logger.warn(
+      `Failed to update send log engagement: ${error instanceof Error ? error.message : String(error)}`
+    );
+    // Don't throw - engagement tracking failures should not block processing
+  }
+}
 
 async function runStandalone(): Promise<void> {
   const args = process.argv.slice(2);

@@ -26,17 +26,18 @@ export function StatusBar({
   statusMessage = 'Ready',
 }: StatusBarProps): React.ReactElement {
   const getShortcuts = (view: DashboardView): string[] => {
+    // Q Quit is available globally on all views
     switch (view) {
       case 'MENU':
         return ['↑↓ Navigate', 'Enter Select', 'Q Quit'];
       case 'IMPORT':
-        return ['Enter Import', 'T Template', 'Esc Back'];
+        return ['Enter Import', 'T Template', 'Esc Back', 'Q Quit'];
       case 'CAMPAIGN':
-        return ['Enter Preview', 'Y Confirm', 'N Cancel', 'Esc Back'];
+        return ['Enter Preview', 'Y Confirm', 'N Cancel', 'Esc Back', 'Q Quit'];
       case 'RESULTS':
-        return ['Esc Back', 'R Refresh'];
+        return ['Esc Back', 'R Refresh', 'Q Quit'];
       default:
-        return ['Esc Back'];
+        return ['Esc Back', 'Q Quit'];
     }
   };
 

@@ -1,17 +1,17 @@
 /**
  * CampaignForm
  *
- * Purpose: Campaign setup form with template path input and preview/confirmation
+ * Purpose: Campaign setup form with preview/confirmation (template loaded from .env)
  * Props: { onCampaignComplete?: () => void, initialPendingCount?: number }
  * State: Uses useCampaign hook for form state
  * Extension: Add template preview, A/B testing options, or scheduling
  */
 
 /** @jsxImportSource react */
-import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
+import { Box, Text, useApp, useInput } from 'ink';
 import type React from 'react';
 import { useEffect } from 'react';
+import { shutdown } from '../../shutdown.js';
 import { useCampaign } from '../hooks/useCampaign.js';
 import { colors, icons, spacing } from '../theme.js';
 import { CampaignStatus } from './CampaignStatus.js';
@@ -24,6 +24,7 @@ interface CampaignFormProps {
 }
 
 export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.ReactElement {
+  const { exit } = useApp();
   const campaign = useCampaign();
   const { status, loadPendingCount, confirmCampaign, reset } = campaign;
 
@@ -36,8 +37,23 @@ export function CampaignForm({ onCampaignComplete }: CampaignFormProps): React.R
 
   // Handle keyboard shortcuts
   useInput((input, key) => {
+    // Global quit shortcut - always available
+    if (input === 'q' || input === 'Q') {
+      shutdown(); // Signal campaign to stop first
+      exit(); // Signal Ink to unmount
+      // Force process exit after brief delay to ensure cleanup
+      setTimeout(() => process.exit(0), 100);
+      return;
+    }
+
     if (key.escape && status !== 'running') {
       reset();
+    }
+    if (status === 'idle' && key.return) {
+      // Generate preview when Enter is pressed in idle state
+      campaign.generateCampaignPreview().catch(() => {
+        // Error handled by hook
+      });
     }
     if (status === 'confirm') {
       if (input === 'y' || input === 'Y') {
@@ -159,7 +175,7 @@ function renderErrorState(campaign: ReturnType<typeof useCampaign>): React.React
 }
 
 function renderConfirmState(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
-  const { campaignId, pendingCount, isContinuous, templatePath, preview } = campaign;
+  const { campaignId, pendingCount, isContinuous, preview } = campaign;
   if (!preview) {
     return <Text>No preview</Text>;
   }
@@ -185,10 +201,6 @@ function renderConfirmState(campaign: ReturnType<typeof useCampaign>): React.Rea
             {isContinuous ? 'YES (Automatic polling enabled)' : 'NO (Run once)'}
           </Text>
         </Box>
-        <Box>
-          <Text>Template: </Text>
-          <Text dimColor={true}>{templatePath}</Text>
-        </Box>
 
         <Box marginTop={1} borderStyle="single" padding={1}>
           <Box>
@@ -212,15 +224,7 @@ function renderConfirmState(campaign: ReturnType<typeof useCampaign>): React.Rea
 }
 
 function renderInputForm(campaign: ReturnType<typeof useCampaign>): React.ReactElement {
-  const {
-    campaignId,
-    pendingCount,
-    templatePath,
-    setTemplatePath,
-    generateCampaignPreview,
-    isContinuous,
-    status,
-  } = campaign;
+  const { campaignId, pendingCount, isContinuous, status } = campaign;
 
   return (
     <Panel title="📤 Send Email Campaign" borderColor={colors.primary}>
@@ -236,21 +240,6 @@ function renderInputForm(campaign: ReturnType<typeof useCampaign>): React.ReactE
           <Text bold={true} color={pendingCount > 0 ? colors.success : colors.warning}>
             {pendingCount}
           </Text>
-        </Box>
-
-        {/* Template Path Input */}
-        <Box marginTop={1}>
-          <Text>Template Path: </Text>
-          <TextInput
-            value={templatePath}
-            onChange={setTemplatePath}
-            onSubmit={() => {
-              generateCampaignPreview().catch(() => {
-                // Error handled by hook
-              });
-            }}
-            placeholder="./template.md"
-          />
         </Box>
 
         {/* Continuous mode hint */}
@@ -271,7 +260,7 @@ function renderInputForm(campaign: ReturnType<typeof useCampaign>): React.ReactE
         {/* Help text */}
         {status !== 'loading' && (
           <Box marginTop={1} flexDirection="column">
-            <Text dimColor={true}>Enter the path to your markdown template and press Enter</Text>
+            <Text dimColor={true}>Press Enter to generate preview and start campaign</Text>
             <Text dimColor={true}>Press Escape to cancel</Text>
           </Box>
         )}

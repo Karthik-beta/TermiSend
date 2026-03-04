@@ -54,6 +54,7 @@ export type {
   ContactDuplicateSkippedPayload,
   ContactImportedPayload,
   ContactInvalidPayload,
+  ContactSuppressedPayload,
   ContactVerifiedPayload,
   DomainEvent,
   DomainEventHandler,
@@ -65,6 +66,12 @@ export type {
   QuotaCheckFailedPayload,
   QuotaCheckPassedPayload,
   QuotaSnapshotRecordedPayload,
+  SESBounceProcessedPayload,
+  SESClickRecordedPayload,
+  SESComplaintProcessedPayload,
+  SESDeliveryConfirmedPayload,
+  SESEventReceivedPayload,
+  SESOpenRecordedPayload,
   SesApiCalledPayload,
   ThrottleDelayCompletedPayload,
   ThrottleDelayStartedPayload,
@@ -135,3 +142,6 @@ export {
   // Registration functions
   registerVerificationHandlers,
 } from './handlers.js';
+
+// Note: SQS Consumer functions (startConsumer, stopConsumer, getConsumerStatus)
+// should be imported directly from '../sqs-consumer.js' to maintain clear module boundaries

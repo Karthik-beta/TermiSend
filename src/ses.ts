@@ -18,7 +18,7 @@ import {
 } from './events/index.js';
 import { logger } from './logger.js';
 import { getSesClient, verifySesConfiguration } from './ses-quota.js';
-import { isShuttingDown } from './shutdown.js';
+import { getShutdownSignal, isShuttingDown } from './shutdown.js';
 import type { EmailThrottleController } from './throttle.js';
 import { delay, getEmailThrottleController } from './throttle.js';
 import type { EmailSendParams, EmailSendResult } from './types.js';
@@ -220,7 +220,7 @@ async function sendWithRetry(
         await logger.warn(`Throttling, retrying in ${backoffMs}ms: ${lastError.message}`);
 
         controller.releaseSendPermission();
-        await delay(backoffMs);
+        await delay(backoffMs, getShutdownSignal());
         continue;
       }
 

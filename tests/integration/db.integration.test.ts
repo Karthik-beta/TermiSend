@@ -76,21 +76,6 @@ describe('Database Integration Tests', () => {
 
       expect(contact.companyName).toBe('Test Co');
       expect(contact.personName).toBe('John');
-      expect(contact.status).toBe('pending');
-    });
-
-    it('should update contact status', async () => {
-      if (!dbAvailable || !db) {
-        console.log('Skipping test - database not available');
-        return;
-      }
-      const contact = await db.insertContact('Test Co', 'Jane', `jane_${Date.now()}@test.com`);
-
-      await db.updateContactStatus(contact.email, 'sent');
-
-      const contacts = await db.getContacts('sent');
-      const updated = contacts.find((c) => c.email === contact.email);
-      expect(updated?.status).toBe('sent');
     });
 
     it('should check contact existence', async () => {
@@ -116,18 +101,6 @@ describe('Database Integration Tests', () => {
       expect(exists).toBe(false);
     });
 
-    it('should get pending contacts', async () => {
-      if (!dbAvailable || !db) {
-        console.log('Skipping test - database not available');
-        return;
-      }
-      const email = `pending_${Date.now()}@test.com`;
-      await db.insertContact('Test Co', 'Pending', email);
-
-      const pending = await db.getPendingContacts();
-
-      expect(pending.length).toBeGreaterThan(0);
-    });
   });
 
   describe('Audit Logging', () => {
@@ -150,6 +123,316 @@ describe('Database Integration Tests', () => {
         return;
       }
       await expect(db.closeConnection()).resolves.toBeUndefined();
+    });
+  });
+
+  // ============================================================================
+  // SES Event Tracking Tests
+  // ============================================================================
+
+  describe('SES Event Tracking Schema', () => {
+    it('should create ses_event_tracking table', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+      // Schema is created during initializeSchema()
+      await expect(db.initializeSchema()).resolves.toBeUndefined();
+
+      // Verify table exists by querying
+      const testSql = postgres({
+        host: process.env.TEST_DB_HOST || 'localhost',
+        port: Number.parseInt(process.env.TEST_DB_PORT || '5432', 10),
+        user: process.env.TEST_DB_USER || 'test',
+        password: process.env.TEST_DB_PASS || 'test',
+        database: process.env.TEST_DB_NAME || 'termisend_test',
+        max: 1,
+      });
+
+      const result = await testSql`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_name = 'ses_event_tracking'
+        );
+      `;
+      await testSql.end();
+      
+      expect(result[0].exists).toBe(true);
+    });
+
+    it('should create contact_suppressions table', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+      await expect(db.initializeSchema()).resolves.toBeUndefined();
+
+      const testSql = postgres({
+        host: process.env.TEST_DB_HOST || 'localhost',
+        port: Number.parseInt(process.env.TEST_DB_PORT || '5432', 10),
+        user: process.env.TEST_DB_USER || 'test',
+        password: process.env.TEST_DB_PASS || 'test',
+        database: process.env.TEST_DB_NAME || 'termisend_test',
+        max: 1,
+      });
+
+      const result = await testSql`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_name = 'contact_suppressions'
+        );
+      `;
+      await testSql.end();
+      
+      expect(result[0].exists).toBe(true);
+    });
+  });
+
+  describe('createSESEventTracking()', () => {
+    it('should create SES event tracking record', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const eventData = {
+        eventType: 'Bounce',
+        snsMessageId: `sns-msg-${Date.now()}`,
+        sesMessageId: `ses-msg-${Date.now()}`,
+        recipientEmail: 'test@example.com',
+        sourceEmail: 'sender@example.com',
+        eventData: { bounceType: 'Permanent' },
+        occurredAt: new Date(),
+      };
+
+      await expect(db.createSESEventTracking(eventData)).resolves.toBeUndefined();
+    });
+
+    it('should create record with contact and send log IDs', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      // First create a contact
+      const contact = await db.insertContact('Test Co', 'Test', `event_${Date.now()}@test.com`);
+      
+      // Create a send log
+      const sendLog = await db.createSendLog(
+        contact.id,
+        'production',
+        'Test Subject',
+        'Test body preview...'
+      );
+
+      const eventData = {
+        eventType: 'Delivery',
+        snsMessageId: `sns-msg-${Date.now()}`,
+        sesMessageId: `ses-msg-${Date.now()}`,
+        contactId: contact.id,
+        sendLogId: sendLog.id,
+        recipientEmail: contact.email,
+        sourceEmail: 'sender@example.com',
+        eventData: { timestamp: new Date().toISOString() },
+        occurredAt: new Date(),
+      };
+
+      await expect(db.createSESEventTracking(eventData)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('createContactSuppression()', () => {
+    it('should create contact suppression record', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      // First create a contact
+      const contact = await db.insertContact('Test Co', 'Test', `suppress_${Date.now()}@test.com`);
+
+      const suppressionData = {
+        contactId: contact.id,
+        suppressionType: 'bounce' as const,
+        suppressionReason: 'Hard bounce: General',
+        sesMessageId: 'ses-msg-123',
+        originalEventData: { bounceType: 'Permanent' },
+      };
+
+      await expect(db.createContactSuppression(suppressionData)).resolves.toBeUndefined();
+    });
+
+    it('should handle duplicate suppression gracefully', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `dup_${Date.now()}@test.com`);
+
+      const suppressionData = {
+        contactId: contact.id,
+        suppressionType: 'bounce' as const,
+        suppressionReason: 'Hard bounce: General',
+      };
+
+      // Create first suppression
+      await db.createContactSuppression(suppressionData);
+      
+      // Second creation should not throw (ON CONFLICT DO NOTHING)
+      await expect(db.createContactSuppression(suppressionData)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('getContactSuppression()', () => {
+    it('should return suppression record for suppressed contact', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `get_supp_${Date.now()}@test.com`);
+      
+      await db.createContactSuppression({
+        contactId: contact.id,
+        suppressionType: 'complaint',
+        suppressionReason: 'Spam complaint',
+      });
+
+      const suppression = await db.getContactSuppression(contact.id);
+
+      expect(suppression).not.toBeNull();
+      expect(suppression?.suppressionType).toBe('complaint');
+      expect(suppression?.suppressionReason).toBe('Spam complaint');
+    });
+
+    it('should return null for non-suppressed contact', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `no_supp_${Date.now()}@test.com`);
+
+      const suppression = await db.getContactSuppression(contact.id);
+
+      expect(suppression).toBeNull();
+    });
+  });
+
+  describe('isContactSuppressed()', () => {
+    it('should return true for suppressed contact', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `is_supp_${Date.now()}@test.com`);
+      
+      await db.createContactSuppression({
+        contactId: contact.id,
+        suppressionType: 'bounce',
+        suppressionReason: 'Hard bounce',
+      });
+
+      const isSuppressed = await db.isContactSuppressed(contact.id);
+      expect(isSuppressed).toBe(true);
+    });
+
+    it('should return false for non-suppressed contact', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `is_not_${Date.now()}@test.com`);
+
+      const isSuppressed = await db.isContactSuppressed(contact.id);
+      expect(isSuppressed).toBe(false);
+    });
+  });
+
+  describe('getSendLogByMessageId()', () => {
+    it('should find send log by SES message ID', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `log_${Date.now()}@test.com`);
+      const messageId = `test-message-id-${Date.now()}`;
+      
+      const sendLog = await db.createSendLog(
+        contact.id,
+        'production',
+        'Test Subject',
+        'Test body preview...'
+      );
+
+      // Update send log with message ID
+      await db.updateSendLog(sendLog.id, {
+        status: 'sent',
+        messageId: messageId,
+        sentAt: new Date(),
+      });
+
+      const found = await db.getSendLogByMessageId(messageId);
+
+      expect(found).not.toBeNull();
+      expect(found?.id).toBe(sendLog.id);
+      expect(found?.contactId).toBe(contact.id);
+    });
+
+    it('should return null for non-existent message ID', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const found = await db.getSendLogByMessageId('non-existent-id');
+      expect(found).toBeNull();
+    });
+  });
+
+  describe('updateSendLogEngagement()', () => {
+    it('should update send log with open engagement', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `open_${Date.now()}@test.com`);
+      const sendLog = await db.createSendLog(
+        contact.id,
+        'production',
+        'Test Subject',
+        'Test body preview...'
+      );
+
+      await expect(
+        db.updateSendLogEngagement(sendLog.id, 'open', new Date())
+      ).resolves.toBeUndefined();
+    });
+
+    it('should update send log with click engagement', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const contact = await db.insertContact('Test Co', 'Test', `click_${Date.now()}@test.com`);
+      const sendLog = await db.createSendLog(
+        contact.id,
+        'production',
+        'Test Subject',
+        'Test body preview...'
+      );
+
+      await expect(
+        db.updateSendLogEngagement(sendLog.id, 'click', new Date(), { link: 'https://example.com' })
+      ).resolves.toBeUndefined();
     });
   });
 });

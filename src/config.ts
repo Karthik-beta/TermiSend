@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from 'dotenv';
+import { validateTemplatePath } from './path-validator.js';
 
 // ============================================================================
 // Environment Configuration
@@ -201,4 +202,132 @@ export function getAnalyticsRateLimitMs(): number {
   const env = getEnv();
   // Default to 1000ms (1 req/sec) as per AWS SES API limits
   return Number.parseInt(env.ANALYTICS_RATE_LIMIT_MS || '1000', 10);
+}
+
+// ============================================================================
+// Email Template Configuration
+// ============================================================================
+
+/**
+ * Get the email template path from environment variables
+ * @returns Validated absolute path to the email template file
+ * @throws Error if EMAIL_TEMPLATE_PATH is not configured or the template file cannot be found
+ */
+export function getEmailTemplatePath(): string {
+  const env = getEnv();
+  const templatePath = env.EMAIL_TEMPLATE_PATH;
+
+  if (!templatePath) {
+    throw new Error('EMAIL_TEMPLATE_PATH is not configured or the template file cannot be found.');
+  }
+
+  const validation = validateTemplatePath(templatePath);
+
+  if (!validation.valid) {
+    throw new Error('EMAIL_TEMPLATE_PATH is not configured or the template file cannot be found.');
+  }
+
+  return validation.sanitizedPath;
+}
+
+/**
+ * Get the subject template path from environment variables
+ * @returns Validated absolute path to the subject template file
+ * @throws Error if SUBJECT_TEMPLATE_PATH is not configured or the template file cannot be found
+ */
+export function getSubjectTemplatePath(): string {
+  const env = getEnv();
+  const templatePath = env.SUBJECT_TEMPLATE_PATH;
+
+  if (!templatePath) {
+    throw new Error(
+      'SUBJECT_TEMPLATE_PATH is not configured or the template file cannot be found.'
+    );
+  }
+
+  const validation = validateTemplatePath(templatePath);
+
+  if (!validation.valid) {
+    throw new Error(
+      'SUBJECT_TEMPLATE_PATH is not configured or the template file cannot be found.'
+    );
+  }
+
+  return validation.sanitizedPath;
+}
+
+// ============================================================================
+// SQS Consumer Configuration
+// ============================================================================
+
+import type { SQSConsumerConfig } from './types.js';
+
+/**
+ * Get SQS consumer configuration from environment
+ * @returns SQSConsumerConfig with validated settings, or null if not configured
+ */
+export function getSQSConfig(): SQSConsumerConfig | null {
+  const env = getEnv();
+
+  const queueUrl = env.SQS_QUEUE_URL || process.env.SQS_QUEUE_URL;
+  const awsAccessKeyId = env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const awsSecretAccessKey = env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+
+  // Return null if required configuration is missing (SQS is optional)
+  if (!queueUrl || !awsAccessKeyId || !awsSecretAccessKey) {
+    return null;
+  }
+
+  const region = env.AWS_REGION || process.env.AWS_REGION || 'us-east-1';
+
+  return {
+    queueUrl,
+    region,
+    credentials: {
+      accessKeyId: awsAccessKeyId,
+      secretAccessKey: awsSecretAccessKey,
+    },
+    pollingIntervalMs: Number.parseInt(env.SQS_POLLING_INTERVAL_MS || '10000', 10),
+    maxMessagesPerPoll: Number.parseInt(env.SQS_MAX_MESSAGES_PER_POLL || '10', 10),
+    visibilityTimeoutSeconds: Number.parseInt(env.SQS_VISIBILITY_TIMEOUT_SECONDS || '300', 10),
+    waitTimeSeconds: Number.parseInt(env.SQS_WAIT_TIME_SECONDS || '20', 10),
+    maxReceiveCount: Number.parseInt(env.SQS_MAX_RECEIVE_COUNT || '3', 10),
+    autoDelete: (env.SQS_AUTO_DELETE || 'true') === 'true',
+    debugLogging: (env.SQS_DEBUG_LOGGING || 'false') === 'true',
+  };
+}
+
+/**
+ * Check if SQS consumer is enabled
+ * @returns Boolean indicating if consumer should start
+ */
+export function isSQSConsumerEnabled(): boolean {
+  const env = getEnv();
+  const enabled = env.SQS_CONSUMER_ENABLED || process.env.SQS_CONSUMER_ENABLED;
+
+  // Consumer is only enabled if explicitly enabled AND config is present
+  if (enabled !== 'true') {
+    return false;
+  }
+
+  const config = getSQSConfig();
+  return config !== null;
+}
+
+/**
+ * Get SQS queue URL from environment
+ * @returns Queue URL string
+ * @throws Error if not configured
+ */
+export function getSQSQueueUrl(): string {
+  const env = getEnv();
+  const queueUrl = env.SQS_QUEUE_URL || process.env.SQS_QUEUE_URL;
+
+  if (!queueUrl) {
+    throw new Error(
+      'SQS_QUEUE_URL is not configured. Set it in environment variables or .env file.'
+    );
+  }
+
+  return queueUrl;
 }

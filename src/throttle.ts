@@ -15,7 +15,7 @@ import {
 } from './events/index.js';
 import { logger } from './logger.js';
 import { getAccountInfo } from './ses-quota.js';
-import { isShuttingDown, throwIfShuttingDown } from './shutdown.js';
+import { getShutdownSignal, isShuttingDown, throwIfShuttingDown } from './shutdown.js';
 import type { DelayResult, QuotaStatus, RateLimiter, ThrottleConfig } from './types.js';
 
 // ============================================================================
@@ -607,7 +607,7 @@ export class EmailThrottleController {
         // Wait for next interval or until end
         const waitMs = Math.min(progressIntervalMs, remainingMs);
         if (waitMs > 0) {
-          await delay(waitMs);
+          await delay(waitMs, getShutdownSignal());
         }
       }
 
@@ -616,7 +616,7 @@ export class EmailThrottleController {
     } else {
       // Execute the delay without progress updates - check shutdown before and after
       throwIfShuttingDown();
-      await delay(delayResult.totalDelayMs);
+      await delay(delayResult.totalDelayMs, getShutdownSignal());
       throwIfShuttingDown();
     }
 

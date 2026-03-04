@@ -8,10 +8,11 @@
  */
 
 /** @jsxImportSource react */
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useApp, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import type React from 'react';
 import { useEffect } from 'react';
+import { shutdown } from '../../shutdown.js';
 import { useImport } from '../hooks/useImport.js';
 import { colors, icons, spacing } from '../theme.js';
 import { ErrorText, SuccessText, WarningText } from './common/Text.js';
@@ -23,6 +24,7 @@ interface ImportFormProps {
 }
 
 export function ImportForm({ onImportComplete }: ImportFormProps): React.ReactElement {
+  const { exit } = useApp();
   const {
     importStatus,
     importResult,
@@ -39,6 +41,15 @@ export function ImportForm({ onImportComplete }: ImportFormProps): React.ReactEl
 
   // Handle keyboard shortcuts
   useInput((input, key) => {
+    // Global quit shortcut - always available
+    if (input === 'q' || input === 'Q') {
+      shutdown(); // Signal campaign to stop first
+      exit(); // Signal Ink to unmount
+      // Force process exit after brief delay to ensure cleanup
+      setTimeout(() => process.exit(0), 100);
+      return;
+    }
+
     if (key.escape && importStatus !== 'loading') {
       reset();
     }

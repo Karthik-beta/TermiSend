@@ -68,3 +68,5 @@ test-output.txt
 /plans
 /data
 /prompts
+.agent/
+contacts-template.xlsx

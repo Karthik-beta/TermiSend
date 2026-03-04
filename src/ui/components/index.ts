@@ -4,6 +4,7 @@
  * Purpose: Central export point for dashboard UI components
  */
 
+export { AnalyticsDashboard } from './AnalyticsDashboard.js';
 export { CampaignForm } from './CampaignForm.js';
 export { CampaignStatus } from './CampaignStatus.js';
 export { ContactList } from './ContactList.js';

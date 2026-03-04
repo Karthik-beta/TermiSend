@@ -6,6 +6,7 @@
 import ExcelJs from 'exceljs';
 import { z } from 'zod';
 import { insertContactSkipDuplicate } from './db.js';
+import { emitAnalyticsEvent } from './events/bus.js';
 import {
   type ContactDuplicateSkippedPayload,
   type ContactImportedPayload,
@@ -304,6 +305,15 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
       skippedCount: result.skippedCount,
       existingCount: result.existingCount,
     });
+
+    // Emit analytics event for imported contacts
+    if (result.insertedCount > 0) {
+      try {
+        emitAnalyticsEvent({ type: 'contact:imported', count: result.insertedCount });
+      } catch {
+        // Silently ignore event emission errors
+      }
+    }
 
     // Simple console summary
     logger.info(
