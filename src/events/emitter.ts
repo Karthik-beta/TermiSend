@@ -92,34 +92,39 @@ export class DomainEventEmitter {
    * @param event - Domain event to emit
    */
   emit(event: DomainEvent): void {
-    const handlers = this.handlers.get(event.type);
-    if (handlers) {
-      // Execute handlers with error isolation
-      for (const handler of handlers) {
-        try {
-          handler(event);
-        } catch (error) {
-          // Silently ignore handler errors to prevent disrupting main flow
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          logger.warn(`Domain event handler error for ${event.type}`, {
-            error: errorMessage,
-            eventId: event.eventId,
-            eventType: event.type,
-          });
+    try {
+      const handlers = this.handlers.get(event.type);
+      if (handlers) {
+        // Execute handlers with error isolation
+        for (const handler of handlers) {
+          try {
+            handler(event);
+          } catch (error) {
+            // Silently ignore handler errors to prevent disrupting main flow
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            logger.warn(`Domain event handler error for ${event.type}`, {
+              error: errorMessage,
+              eventId: event.eventId,
+              eventType: event.type,
+            });
+          }
         }
       }
-    }
 
-    // Persist to analytics database asynchronously (Phase 4 implementation)
-    this.persistEvent(event).catch((error) => {
+      // Persist to analytics database asynchronously (Phase 4 implementation)
+      this.persistEvent(event).catch((error) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        // biome-ignore lint/complexity/noVoid: Intentional fire-and-forget for error logging
+        void logger.logError(
+          `Failed to persist domain event ${event.type}`,
+          error instanceof Error ? error : errorMessage,
+          { eventId: event.eventId }
+        );
+      });
+    } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      // biome-ignore lint/complexity/noVoid: Intentional fire-and-forget for error logging
-      void logger.logError(
-        `Failed to persist domain event ${event.type}`,
-        error instanceof Error ? error : errorMessage,
-        { eventId: event.eventId }
-      );
-    });
+      console.error(`[TermiSend] Domain event emission error for ${event.type}:`, errorMessage);
+    }
   }
 
   /**

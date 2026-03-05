@@ -7,7 +7,6 @@
 import { render } from 'ink';
 import { isSQSConsumerEnabled } from './config.js';
 import { closeConnection, initializeSchema } from './db.js';
-import { domainEvents, registerAllAnalyticsHandlers } from './events/index.js';
 import { logger } from './logger.js';
 import { shutdown } from './shutdown.js';
 import { startConsumer, stopConsumer } from './sqs-consumer.js';
@@ -20,9 +19,6 @@ import App from './ui/index.js';
 async function main(): Promise<void> {
   try {
     await initializeSchema();
-
-    // Register analytics event handlers
-    registerAllAnalyticsHandlers(domainEvents);
 
     // Start SQS consumer if enabled
     if (isSQSConsumerEnabled()) {

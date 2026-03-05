@@ -7,45 +7,13 @@
  * - DomainEvent interface and payload types
  * - DomainEventEmitter singleton for event handling
  * - Utility functions for event creation
- *
- * Usage:
- * ```typescript
- * import {
- *   DomainEventType,
- *   domainEvents,
- *   createEvent,
- *   type ContactImportedPayload,
- *   type DomainEvent
- * } from './events/index.js';
- *
- * // Create and emit an event
- * const event = createEvent(DomainEventType.CONTACT_IMPORTED, {
- *   contactId: '123',
- *   email: 'test@example.com',
- *   companyName: 'Acme Corp',
- *   personName: 'John Doe',
- *   sourceFile: '/path/to/contacts.xlsx',
- *   rowNumber: 5
- * });
- * domainEvents.emit(event);
- *
- * // Subscribe to events
- * domainEvents.on(DomainEventType.EMAIL_SENT, (event) => {
- *   console.log('Email sent:', event.payload);
- * });
- * ```
+ * - Repository functions for event querying
  */
 
 // ============================================================================
 // Type Exports
 // ============================================================================
 
-// Base event interface and handler type
-// Contact lifecycle event payloads
-// Email sending event payloads
-// API event payloads
-// Quota and throttling event payloads
-// Campaign event payloads
 export type {
   CampaignCompletedPayload,
   CampaignPausedPayload,
@@ -65,7 +33,6 @@ export type {
   EmailSkippedPayload,
   QuotaCheckFailedPayload,
   QuotaCheckPassedPayload,
-  QuotaSnapshotRecordedPayload,
   SESBounceProcessedPayload,
   SESClickRecordedPayload,
   SESComplaintProcessedPayload,
@@ -98,50 +65,12 @@ export {
 // ============================================================================
 
 // Repository type exports
-export type {
-  AnalyticsEventRecord,
-  SendOutcomeMetricRecord,
-  SesApiMetricRecord,
-  ThrottlingMetricRecord,
-  VerificationMetricRecord,
-} from './repository.js';
-// Repository functions for analytics persistence and querying
+export type { AnalyticsEventRecord } from './repository.js';
+// Repository functions for analytics querying
 export {
   getEventsByContactId,
   getEventsByCorrelationId,
   getEventsByDateRange,
-  // Event querying
   getEventsByType,
-  getSesApiMetric,
-  getThrottlingMetric,
-  // Metrics querying
-  getVerificationMetric,
-  // Event persistence
   saveEvent,
-  saveSendOutcomeMetric,
-  saveSesApiMetric,
-  saveThrottlingMetric,
-  // Metrics persistence
-  saveVerificationMetric,
 } from './repository.js';
-
-// ============================================================================
-// Handler Exports
-// ============================================================================
-
-export {
-  handleSendOutcomeEvent,
-  handleSesApiEvent,
-  handleThrottlingEvent,
-  // Individual handlers
-  handleVerificationEvent,
-  registerAllAnalyticsHandlers,
-  registerSendOutcomeHandlers,
-  registerSesApiHandlers,
-  registerThrottlingHandlers,
-  // Registration functions
-  registerVerificationHandlers,
-} from './handlers.js';
-
-// Note: SQS Consumer functions (startConsumer, stopConsumer, getConsumerStatus)
-// should be imported directly from '../sqs-consumer.js' to maintain clear module boundaries

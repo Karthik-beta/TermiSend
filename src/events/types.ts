@@ -283,23 +283,6 @@ export interface VerifierApiCalledPayload {
 // ============================================================================
 
 /**
- * Payload for QUOTA_SNAPSHOT_RECORDED event
- * Emitted when SES quota data is captured
- */
-export interface QuotaSnapshotRecordedPayload {
-  /** Maximum 24-hour send quota */
-  max24HourSend: number;
-  /** Emails sent in last 24 hours */
-  sentLast24Hours: number;
-  /** Maximum send rate per second */
-  maxSendRate: number;
-  /** Source of quota data */
-  source: 'api' | 'cached';
-  /** Available quota percentage */
-  availablePercentage: number;
-}
-
-/**
  * Payload for QUOTA_CHECK_PASSED event
  * Emitted when quota check allows sending
  */
@@ -517,7 +500,6 @@ export type DomainEventPayload =
   | EmailSkippedPayload
   | SesApiCalledPayload
   | VerifierApiCalledPayload
-  | QuotaSnapshotRecordedPayload
   | QuotaCheckPassedPayload
   | QuotaCheckFailedPayload
   | ThrottleDelayStartedPayload
