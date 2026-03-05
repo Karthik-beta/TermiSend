@@ -1,20 +1,21 @@
 /**
  * Theme Configuration for TermiSend Dashboard UI
  *
- * Purpose: Centralized color, spacing, and styling constants for consistent UI appearance
- * Props: N/A - Constants export
- * State: N/A - Static configuration
- * Extension: Add new color schemes, spacing scales, or border styles as needed
+ * Industrial/utilitarian terminal aesthetic.
+ * Monochrome base with sharp amber and green accents.
+ * Designed for clarity during campaign execution.
  */
 
 // ============================================================================
-// Color Palette
+// Color Palette — Monochrome + Amber/Green accents
 // ============================================================================
 
 export const colors = {
-  // Primary brand colors
-  primary: 'cyan',
-  primaryBright: 'cyanBright',
+  // Primary accent — amber/gold for key UI elements
+  primary: 'yellow',
+  primaryBright: 'yellowBright',
+
+  // Secondary accent — cool blue for structural elements
   secondary: 'blue',
   secondaryBright: 'blueBright',
 
@@ -25,7 +26,7 @@ export const colors = {
   warningBright: 'yellowBright',
   error: 'red',
   errorBright: 'redBright',
-  info: 'blue',
+  info: 'cyan',
 
   // Neutral colors
   white: 'white',
@@ -35,14 +36,22 @@ export const colors = {
 
   // Status-specific colors
   status: {
-    verifying: 'yellow',
+    verifying: 'cyan',
     waiting: 'yellow',
-    sending: 'blue',
+    sending: 'blueBright',
     completed: 'green',
     skipped: 'gray',
     failed: 'red',
-    idle: 'white',
+    idle: 'gray',
     loading: 'yellow',
+  } as const,
+
+  // Activity feed source colors
+  source: {
+    verifier: 'cyan',
+    ses: 'blueBright',
+    import: 'magenta',
+    system: 'gray',
   } as const,
 } as const;
 
@@ -75,22 +84,23 @@ export const borders = {
 } as const;
 
 // ============================================================================
-// Layout Dimensions
+// Layout Dimensions — Vertical Flow
 // ============================================================================
 
 export const layout = {
-  // Dashboard layout percentages
-  sidebarWidth: 20, // Percentage
-  mainWidth: 50, // Percentage
-  contactsWidth: 30, // Percentage
-
-  // Fixed dimensions
-  headerHeight: 3,
+  // Vertical section heights
+  headerHeight: 1,
+  bannerHeight: 3,
+  analyticsHeight: 3,
+  feedHeight: 10,
   statusBarHeight: 1,
-  logPanelHeight: 8,
 
   // Progress bar
   progressBarWidth: 30,
+
+  // Activity feed
+  maxFeedEntries: 30,
+  visibleFeedEntries: 8,
 } as const;
 
 // ============================================================================
@@ -98,14 +108,12 @@ export const layout = {
 // ============================================================================
 
 export const typography = {
-  // Text styles
   bold: true,
   dim: true,
   underline: true,
   italic: true,
   strikethrough: true,
 
-  // Common decorations
   header: { bold: true },
   label: { bold: true, dimColor: true },
   value: {},
@@ -113,36 +121,39 @@ export const typography = {
 } as const;
 
 // ============================================================================
-// Status Icons
+// Icons — Clean ASCII for terminal compatibility
 // ============================================================================
 
 export const icons = {
   // Navigation
-  menu: '☰',
-  import: '📥',
-  campaign: '📤',
-  quit: '❌',
-  back: '←',
+  menu: '≡',
+  import: '>>',
+  campaign: '>>',
+  quit: '×',
+  back: '<-',
 
   // Status indicators
   success: '✓',
   error: '✗',
-  warning: '⚠',
-  info: 'ℹ',
+  warning: '!',
+  info: '·',
   pending: '○',
 
   // Sending status
-  verifying: '🔄',
-  waiting: '⏱️',
-  sending: '📤',
+  verifying: '~',
+  waiting: '…',
+  sending: '>',
   completed: '✓',
-  skipped: '→',
+  skipped: '-',
   failed: '✗',
 
   // UI elements
-  bullet: '•',
+  bullet: '·',
   arrow: '→',
   ellipsis: '…',
+  separator: '│',
+  block: '▌',
+  line: '─',
 } as const;
 
 // ============================================================================
@@ -181,4 +192,11 @@ export function formatMsToSeconds(ms: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+}
+
+/**
+ * Get color for an activity feed source tag
+ */
+export function getSourceColor(source: string): string {
+  return colors.source[source as keyof typeof colors.source] ?? colors.gray;
 }

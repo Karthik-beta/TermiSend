@@ -1,27 +1,34 @@
 /**
  * Dashboard
  *
- * Purpose: Main dashboard layout composing all panels into a cohesive interface
- * Props: None - Self-contained layout component using hooks for state
- * State: Managed via useNavigation, useContacts, and useCampaign hooks
- * Extension: Add customizable layouts, panel resizing, or tabbed interfaces
+ * Purpose: Main dashboard layout — vertical single-column flow.
+ * Layout: Header → Campaign Banner → Analytics → Main Content → Activity Feed → Status Bar
+ *
+ * The UI shows campaign progress, analytics, and live events at all times.
+ * Main content area switches between Menu, Import, and Campaign views.
  */
 
 /** @jsxImportSource react */
-import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, useApp, useInput, useStdout } from 'ink';
 import type React from 'react';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { getEmailVerifierCredits } from '../../db.js';
+import { type AnalyticsEvent, eventBus } from '../../events/bus.js';
+import { logger } from '../../logger.js';
+import { fetchQuotaStatus } from '../../ses-quota.js';
 import { shutdown } from '../../shutdown.js';
+import type { QuotaStatus } from '../../types.js';
 import { useCampaign, useContacts, useNavigation } from '../hooks/index.js';
-import { colors } from '../theme.js';
+import { useActivityFeed } from '../hooks/useActivityFeed.js';
+import { layout } from '../theme.js';
 import type { DashboardView } from '../types.js';
+import { ActivityFeed } from './ActivityFeed.js';
+import { AnalyticsPanel } from './AnalyticsPanel.js';
+import { CampaignBanner } from './CampaignBanner.js';
 import { CampaignForm } from './CampaignForm.js';
-import { ContactList } from './ContactList.js';
 import { Header } from './Header.js';
 import { ImportForm } from './ImportForm.js';
-import { LogOutput } from './LogOutput.js';
 import { Menu } from './Menu.js';
-import { Panel } from './Panel.js';
 import { StatusBar } from './StatusBar.js';
 
 /**
@@ -31,58 +38,110 @@ export function Dashboard(): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
 
-  // Get terminal dimensions and calculate responsive layout
+  // Terminal dimensions
   const terminalHeight = stdout.rows;
 
-  // Fixed element heights - ultra compact
-  const HeaderHeight = 2; // Minimal header
-  const StatusBarHeight = 1; // Status bar height
-  const Margins = 0; // No margins
+  // Fixed section heights
+  const fixedHeight =
+    layout.headerHeight + layout.bannerHeight + layout.analyticsHeight + layout.statusBarHeight;
 
-  // Calculate available height for content
-  const availableHeight = useMemo(
-    () => Math.max(10, terminalHeight - HeaderHeight - StatusBarHeight - Margins),
-    [terminalHeight]
-  );
+  // Activity feed height — 30% of remaining space, min 5 lines
+  const remainingHeight = Math.max(10, terminalHeight - fixedHeight);
+  const feedHeight = Math.max(5, Math.min(layout.feedHeight, Math.floor(remainingHeight * 0.35)));
+  const mainContentHeight = Math.max(6, remainingHeight - feedHeight);
 
-  // Calculate heights for different sections - very compact log area
-  const sidebarHeight = availableHeight;
-  const logHeight = Math.max(3, Math.min(4, Math.floor(terminalHeight * 0.08)));
-  const mainContentHeight = Math.max(6, availableHeight - logHeight);
-
-  // Calculate max entries for log output - limited to 4-5 max
-  // Each log entry takes 1 line, and panel has padding + title
-  const logMaxEntries = Math.max(2, Math.min(4, logHeight - 1));
-
-  // Calculate max contacts to display based on available height
-  // Header stats take ~3 lines, each contact takes 2 lines, plus some padding
-  const contactMaxDisplay = Math.max(3, Math.floor((mainContentHeight - 4) / 2));
+  // Feed visible entries (each entry = 1 line, minus header line)
+  const feedVisibleEntries = Math.max(3, feedHeight - 2);
 
   // Navigation state
   const { currentView, navigateTo, handleMenuSelect, goToMenu } = useNavigation(exit);
 
   // Contact data
-  const {
-    contacts,
-    pendingCount,
-    isLoading: contactsLoading,
-    refresh: refreshContacts,
-  } = useContacts();
+  const { refresh: refreshContacts } = useContacts();
 
-  // Campaign state for log display
-  const { logEntries, status: campaignStatus } = useCampaign();
+  // Campaign state (LIFTED to share between Banner and Form)
+  const campaign = useCampaign();
+  const { liveProgress, status: campaignStatus } = campaign;
+
+  // SES Quota state
+  const [quota, setQuota] = useState<QuotaStatus | null>(null);
+
+  // Activity feed
+  const activityFeed = useActivityFeed();
+
+  // Verifier Credits state
+  const [verifierCredits, setVerifierCredits] = useState<number | null>(null);
+
+  // Fetch verifier credits initially and periodically
+  useEffect(() => {
+    let mounted = true;
+    const fetchCredits = async () => {
+      try {
+        const res = await getEmailVerifierCredits();
+        if (mounted && res) {
+          setVerifierCredits(res.credits);
+        }
+      } catch (error) {
+        // Log error for debugging but don't crash UI
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.warn('Failed to fetch MyEmailVerifier credits', { error: errorMessage });
+      }
+    };
+
+    fetchCredits();
+    // Refresh credits every 60 seconds (less frequent than SES quota)
+    const interval = setInterval(fetchCredits, 60000);
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+  // Fetch SES quota periodically
+  useEffect(() => {
+    let mounted = true;
+    const fetchQuota = async () => {
+      try {
+        const status = await fetchQuotaStatus();
+        if (mounted && status) {
+          setQuota(status);
+        }
+      } catch {
+        // Silently ignore
+      }
+    };
+
+    fetchQuota();
+    const interval = setInterval(fetchQuota, 30000); // Refresh every 30s
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+  // Subscribe to verifier credits updates
+  useEffect(() => {
+    const handleEvent = (event: AnalyticsEvent) => {
+      if (event.type === 'verifier:credits_updated') {
+        setVerifierCredits(event.credits);
+      }
+    };
+    eventBus.on('analytics', handleEvent);
+    return () => {
+      eventBus.off('analytics', handleEvent);
+    };
+  }, []);
 
   // Handle global keyboard shortcuts
   useInput((input, key) => {
-    // Global quit shortcut - force immediate exit
+    // Global quit shortcut
     if (input === 'q' || input === 'Q') {
-      shutdown(); // Signal campaign to stop first
-      exit(); // Signal Ink to unmount
-      // Force immediate exit - bypass event loop that may be blocked by async operations
+      shutdown();
+      exit();
       process.exit(0);
     }
 
-    // Navigation shortcuts
+    // Navigation shortcuts from menu
     if (currentView === 'MENU') {
       if (input === 'i' || input === 'I') {
         navigateTo('IMPORT');
@@ -92,13 +151,13 @@ export function Dashboard(): React.ReactElement {
       }
     }
 
-    // Escape to go back
+    // Escape to go back (not during running campaign)
     if (key.escape && campaignStatus !== 'running') {
       goToMenu();
     }
   });
 
-  // Refresh contacts when returning to menu after import
+  // Refresh contacts when returning after import
   const handleImportComplete = useCallback(() => {
     refreshContacts().catch(() => {
       // Error handled by hook
@@ -106,89 +165,48 @@ export function Dashboard(): React.ReactElement {
   }, [refreshContacts]);
 
   // Render main content based on current view
-  const renderMainContent = (view: DashboardView, contentHeight: number): React.ReactElement => {
-    switch (view) {
-      case 'MENU':
-        return (
-          <Panel
-            title="Welcome"
-            borderColor={colors.primary}
-            flexGrow={1}
-            minHeight={contentHeight - 2}
-          >
-            <Box flexDirection="column" gap={1}>
-              <Text>
-                Welcome to <Text bold={true}>TermiSend</Text> - Email Outreach Dashboard
-              </Text>
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor={true}>Quick Start:</Text>
-                <Text dimColor={true}> 1. Import contacts from Excel file</Text>
-                <Text dimColor={true}> 2. Create email template in markdown</Text>
-                <Text dimColor={true}> 3. Launch campaign to send emails</Text>
-              </Box>
-              <Box marginTop={2}>
-                <Text dimColor={true}>Select an option from the menu to begin →</Text>
-              </Box>
-            </Box>
-          </Panel>
-        );
-
-      case 'IMPORT':
-        return <ImportForm onImportComplete={handleImportComplete} />;
-
-      case 'CAMPAIGN':
-        return <CampaignForm onCampaignComplete={goToMenu} />;
-
-      default:
-        return (
-          <Panel title="Error" borderColor={colors.error}>
-            <Text color={colors.error}>Unknown view: {view}</Text>
-          </Panel>
-        );
-    }
-  };
+  const renderMainContent = useMemo(() => {
+    return (view: DashboardView): React.ReactElement => {
+      switch (view) {
+        case 'IMPORT':
+          return <ImportForm onImportComplete={handleImportComplete} />;
+        case 'CAMPAIGN':
+          return <CampaignForm onCampaignComplete={goToMenu} campaign={campaign} />;
+        default:
+          return <Menu onSelect={handleMenuSelect} />;
+      }
+    };
+  }, [handleImportComplete, goToMenu, handleMenuSelect, campaign]);
 
   return (
-    <Box flexDirection="column" height="100%">
-      {/* Header */}
-      <Header isConnected={true} />
+    <Box flexDirection="column" height={terminalHeight}>
+      {/* Header — 1 line */}
+      <Header
+        isConnected={true}
+        verifierCredits={verifierCredits}
+        quotaRemaining={quota?.remainingQuota}
+        quotaTotal={quota?.max24HourSend}
+      />
 
-      {/* Main Content Area */}
-      <Box
-        flexGrow={1}
-        flexDirection="row"
-        marginTop={0}
-        height={mainContentHeight}
-        overflow="hidden"
-      >
-        {/* Left Sidebar - Menu */}
-        <Box width="20%" flexDirection="column" height={sidebarHeight}>
-          <Menu onSelect={handleMenuSelect} />
-        </Box>
+      {/* Campaign Banner — 3 lines */}
+      <CampaignBanner campaignStatus={campaignStatus} progress={liveProgress} />
 
-        {/* Main Content */}
-        <Box width="50%" flexDirection="column" paddingX={1} height={sidebarHeight}>
-          {renderMainContent(currentView, mainContentHeight)}
-        </Box>
+      {/* Analytics Panel — compact metrics row */}
+      <AnalyticsPanel />
 
-        {/* Right Sidebar - Contacts */}
-        <Box width="30%" flexDirection="column" height={sidebarHeight}>
-          <ContactList
-            contacts={contacts}
-            pendingCount={pendingCount}
-            isLoading={contactsLoading}
-            maxDisplay={contactMaxDisplay}
-            maxHeight={sidebarHeight}
-          />
-        </Box>
+      {/* Main Content Area — flex grow */}
+      <Box flexGrow={1} flexDirection="column" height={mainContentHeight} overflow="hidden">
+        {renderMainContent(currentView)}
       </Box>
 
-      {/* Bottom Section - Activity Log */}
-      <Box flexShrink={0} marginTop={0} height={logHeight} overflow="hidden">
-        <LogOutput entries={logEntries} maxEntries={logMaxEntries} maxHeight={logHeight} />
-      </Box>
+      {/* Activity Feed — bottom section */}
+      <ActivityFeed
+        events={activityFeed.events}
+        maxVisible={feedVisibleEntries}
+        height={feedHeight}
+      />
 
-      {/* Status Bar */}
+      {/* Status Bar — 1 line */}
       <StatusBar currentView={currentView} />
     </Box>
   );

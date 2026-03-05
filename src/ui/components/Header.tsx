@@ -1,10 +1,8 @@
 /**
  * Header
  *
- * Purpose: App header displaying title, connection status, and SES quota information
- * Props: { quotaRemaining?: number | null, quotaTotal?: number | null, isConnected?: boolean }
- * State: None - Presentational component
- * Extension: Add user info, notifications, or system alerts
+ * Purpose: Compact single-line app header with connection indicators.
+ * Industrial aesthetic — block character, separator line, status dots.
  */
 
 /** @jsxImportSource react */
@@ -19,12 +17,15 @@ interface HeaderProps {
   quotaTotal?: number | null;
   /** Database connection status */
   isConnected?: boolean;
+  /** MyEmailVerifier credits */
+  verifierCredits?: number | null;
 }
 
 export function Header({
   quotaRemaining,
   quotaTotal,
   isConnected = true,
+  verifierCredits,
 }: HeaderProps): React.ReactElement {
   const quotaPercent =
     quotaTotal && quotaTotal > 0 && quotaRemaining !== null && quotaRemaining !== undefined
@@ -32,38 +33,27 @@ export function Header({
       : null;
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={colors.primary}
-      paddingX={2}
-      paddingY={1}
-      flexDirection="row"
-      justifyContent="space-between"
-    >
+    <Box flexDirection="row" paddingX={1}>
       {/* App Title */}
-      <Box>
-        <Text bold={true} color={colors.primaryBright}>
-          📧 TermiSend
-        </Text>
-        <Text dimColor={true}> - Email Outreach Dashboard</Text>
-      </Box>
+      <Text bold={true} color={colors.primary}>
+        {icons.block}TermiSend
+      </Text>
+      <Text dimColor={true}> {icons.line.repeat(3)} Email Outreach</Text>
 
       <Spacer />
 
       {/* Status Indicators */}
       <Box gap={2}>
-        {/* Connection Status */}
         <Box>
-          <Text dimColor={true}>DB: </Text>
+          <Text dimColor={true}>DB:</Text>
           <Text color={isConnected ? colors.success : colors.error}>
-            {isConnected ? `${icons.success} Connected` : `${icons.error} Disconnected`}
+            {isConnected ? icons.success : icons.error}
           </Text>
         </Box>
 
-        {/* SES Quota */}
         {quotaPercent !== null && (
           <Box>
-            <Text dimColor={true}>SES: </Text>
+            <Text dimColor={true}>SES:</Text>
             <Text
               color={
                 quotaPercent > 90
@@ -73,10 +63,19 @@ export function Header({
                     : colors.success
               }
             >
-              {quotaPercent}% used
+              {quotaPercent}%
             </Text>
           </Box>
         )}
+
+        <Box>
+          <Text dimColor={true}>Credits:</Text>
+          {verifierCredits !== undefined && verifierCredits !== null ? (
+            <Text color={colors.info}>{verifierCredits}</Text>
+          ) : (
+            <Text color={colors.gray}>-</Text>
+          )}
+        </Box>
       </Box>
     </Box>
   );

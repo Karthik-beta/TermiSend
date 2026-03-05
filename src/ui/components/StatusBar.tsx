@@ -1,17 +1,15 @@
 /**
  * StatusBar
  *
- * Purpose: Bottom status bar showing keyboard shortcuts and current status
- * Props: { currentView: DashboardView, statusMessage?: string }
- * State: None - Presentational component
- * Extension: Add dynamic shortcuts based on context, notification area
+ * Purpose: Bottom status bar showing keyboard shortcuts and current status.
+ * Streamlined to match the new industrial theme.
  */
 
 /** @jsxImportSource react */
 import { Box, Text } from 'ink';
 import type React from 'react';
 import { isDevelopment } from '../../utils/security.js';
-import { colors } from '../theme.js';
+import { colors, icons } from '../theme.js';
 import type { DashboardView } from '../types.js';
 
 interface StatusBarProps {
@@ -26,7 +24,6 @@ export function StatusBar({
   statusMessage = 'Ready',
 }: StatusBarProps): React.ReactElement {
   const getShortcuts = (view: DashboardView): string[] => {
-    // Q Quit is available globally on all views
     switch (view) {
       case 'MENU':
         return ['↑↓ Navigate', 'Enter Select', 'Q Quit'];
@@ -44,20 +41,9 @@ export function StatusBar({
   const shortcuts = getShortcuts(currentView);
 
   return (
-    <Box
-      height={1}
-      flexDirection="row"
-      justifyContent="space-between"
-      borderStyle="single"
-      borderTop={true}
-      borderLeft={false}
-      borderRight={false}
-      borderBottom={false}
-      borderColor={colors.gray}
-      paddingX={1}
-    >
+    <Box height={1} flexDirection="row" justifyContent="space-between" paddingX={1}>
       {/* Keyboard Shortcuts */}
-      <Box gap={2}>
+      <Box gap={1}>
         {shortcuts.map((shortcut, index) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: Acceptable for static shortcut list
           <Text key={`shortcut-${index}`} dimColor={true}>
@@ -66,19 +52,15 @@ export function StatusBar({
         ))}
       </Box>
 
-      {/* Status Message */}
-      <Box>
+      {/* Status + Dev indicator */}
+      <Box gap={1}>
         <Text dimColor={true}>{statusMessage}</Text>
-      </Box>
-
-      {/* Dev Mode Indicator */}
-      {isDevelopment() && (
-        <Box marginLeft={2}>
+        {isDevelopment() && (
           <Text dimColor={true} color={colors.warning}>
-            [DEV MODE]
+            {icons.separator} DEV
           </Text>
-        </Box>
-      )}
+        )}
+      </Box>
     </Box>
   );
 }

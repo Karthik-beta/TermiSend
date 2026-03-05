@@ -107,6 +107,26 @@ export interface LogEntry {
 }
 
 // ============================================================================
+// Activity Feed Types
+// ============================================================================
+
+/**
+ * Source tag for activity feed events
+ */
+export type ActivitySource = 'verifier' | 'ses' | 'import' | 'system';
+
+/**
+ * Single event in the live activity feed
+ */
+export interface ActivityEvent {
+  id: number;
+  source: ActivitySource;
+  message: string;
+  status: 'info' | 'success' | 'warning' | 'error';
+  timestamp: Date;
+}
+
+// ============================================================================
 // Contact State Types
 // ============================================================================
 

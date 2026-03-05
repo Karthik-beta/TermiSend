@@ -1,26 +1,21 @@
 /**
  * TermiSend Dashboard UI - Main Entry Point
  *
- * Purpose: Exports the dashboard App component for use in the main application
- * Props: N/A - Module exports
- * State: N/A - Entry point
- * Extension: Add theme providers, error boundaries, or global state providers
+ * Purpose: Exports the dashboard App component for use in the main application.
+ * The Dashboard component handles the full layout internally.
  */
 
 /** @jsxImportSource react */
 import { Box } from 'ink';
 import type React from 'react';
-import { AnalyticsDashboard } from './components/AnalyticsDashboard.js';
 import { Dashboard } from './components/Dashboard.js';
 
 /**
  * Main App component for the TermiSend Dashboard
- * Wraps the dashboard with any global providers if needed
  */
 export default function App(): React.ReactElement {
   return (
     <Box flexDirection="column" height="100%">
-      <AnalyticsDashboard />
       <Dashboard />
     </Box>
   );
@@ -28,6 +23,10 @@ export default function App(): React.ReactElement {
 
 // Re-export components for advanced use cases
 export {
+  ActivityFeed,
+  AnalyticsDashboard,
+  AnalyticsPanel,
+  CampaignBanner,
   CampaignForm,
   CampaignStatus,
   ContactList,
@@ -41,13 +40,20 @@ export {
 } from './components/index.js';
 
 // Re-export hooks
-export { useCampaign, useContacts, useImport, useNavigation } from './hooks/index.js';
+export {
+  useActivityFeed,
+  useCampaign,
+  useContacts,
+  useImport,
+  useNavigation,
+} from './hooks/index.js';
 
 // Re-export theme
 export {
   borders,
   colors,
   formatMsToSeconds,
+  getSourceColor,
   getStatusColor,
   getStatusIcon,
   icons,
@@ -58,6 +64,8 @@ export {
 
 // Re-export types
 export type {
+  ActivityEvent,
+  ActivitySource,
   CampaignState,
   ContactsState,
   DashboardView,
