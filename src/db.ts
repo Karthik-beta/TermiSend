@@ -1535,7 +1535,7 @@ export async function createSESEventTracking(eventData: {
  */
 export async function createContactSuppression(suppressionData: {
   contactId: string;
-  suppressionType: 'bounce' | 'complaint' | 'manual';
+  suppressionType: 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
   suppressionReason: string;
   sesMessageId?: string;
   originalEventData?: Record<string, unknown>;

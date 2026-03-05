@@ -477,7 +477,7 @@ export interface ContactSuppressedPayload {
   contactId: string;
   messageId: string;
   reason: string;
-  suppressionType: 'bounce' | 'complaint' | 'manual';
+  suppressionType: 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
 }
 
 // ============================================================================

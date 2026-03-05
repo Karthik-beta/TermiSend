@@ -143,11 +143,14 @@ describe('Mailer Module', () => {
       expect(result).toContain('<p>');
     });
 
-    it('should include email-friendly styles', async () => {
+    it('should include minimal inline styles instead of style block', async () => {
       const markdown = '# Test';
       const result = await renderMarkdown(markdown);
 
-      expect(result).toContain('<style');
+      // Should NOT contain a <style> block (promotional signal)
+      expect(result).not.toContain('<style');
+      // Should have minimal inline styling on body
+      expect(result).toContain('font-family: sans-serif');
     });
 
     it('should handle bold text', async () => {

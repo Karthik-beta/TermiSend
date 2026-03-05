@@ -160,6 +160,7 @@ async function validateTemplateFiles(): Promise<string | null> {
 function classifyError(error: unknown): FailureClassification {
   const errorMessage = error instanceof Error ? error.message : String(error);
   const lowerMessage = errorMessage.toLowerCase();
+  const errorName = error instanceof Error ? error.name : '';
 
   // Critical configuration errors - stop campaign immediately
   if (
@@ -185,7 +186,12 @@ function classifyError(error: unknown): FailureClassification {
     lowerMessage.includes('verification failed') ||
     lowerMessage.includes('markdown parsing error') ||
     lowerMessage.includes('spintax') ||
-    lowerMessage.includes('invalid configuration')
+    lowerMessage.includes('invalid configuration') ||
+    lowerMessage.includes('message rejected') ||
+    lowerMessage.includes('unverified') ||
+    errorName === 'MessageRejected' ||
+    errorName === 'MailFromDomainNotVerifiedException' ||
+    errorName === 'ConfigurationSetDoesNotExistException'
   ) {
     return {
       type: 'permanent',
@@ -423,6 +429,15 @@ export function extractSubject(template: string): { subject: string; body: strin
 }
 
 /**
+ * Unsubscribe footer for SES compliance
+ * Kept minimal to avoid promotional email signals
+ */
+const UNSUBSCRIBE_FOOTER = `
+<br><br>
+<span style="font-size: 11px; color: #888;">If this isn't relevant, just reply and let me know - happy to remove you.</span>
+`;
+
+/**
  * Render markdown to HTML
  */
 export async function renderMarkdown(markdown: string): Promise<string> {
@@ -431,36 +446,34 @@ export async function renderMarkdown(markdown: string): Promise<string> {
     breaks: true,
   });
 
-  // Wrap in email-friendly HTML
+  // Minimal HTML wrapper — avoids newsletter-style formatting
+  // that triggers Gmail Promotions tab classification.
+  // No <style> block, no branded colors, no max-width container.
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-    h1, h2, h3 { color: #2c3e50; }
-    p { margin-bottom: 1em; }
-    a { color: #3498db; }
-    ul, ol { margin-bottom: 1em; padding-left: 2em; }
-    li { margin-bottom: 0.5em; }
-    blockquote { border-left: 4px solid #3498db; padding-left: 1em; margin-left: 0; color: #666; }
-    code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
-    pre { background: #f4f4f4; padding: 1em; overflow-x: auto; border-radius: 4px; }
-  </style>
 </head>
-<body>
+<body style="font-family: sans-serif; line-height: 1.5; color: #222;">
   ${html}
+  ${UNSUBSCRIBE_FOOTER}
 </body>
 </html>`;
 }
+
+/**
+ * Plain-text unsubscribe line for compliance
+ */
+const PLAIN_TEXT_UNSUBSCRIBE =
+  "\n\n---\nIf this isn't relevant, just reply and let me know - happy to remove you.";
 
 /**
  * Generate plain text version from markdown
  */
 export function generatePlainText(markdown: string): string {
   // Simple conversion - remove markdown syntax
-  return markdown
+  const body = markdown
     .replace(/^#+\s+/gm, '') // Remove headings
     .replace(/\*\*(.+?)\*\*/g, '$1') // Remove bold
     .replace(/\*(.+?)\*/g, '$1') // Remove italic
@@ -470,6 +483,8 @@ export function generatePlainText(markdown: string): string {
     .replace(/^\s*[-*+]\s/gm, '• ') // Convert list bullets
     .replace(/^\s*\d+\.\s/gm, '$&') // Keep numbered list
     .trim();
+
+  return body + PLAIN_TEXT_UNSUBSCRIBE;
 }
 
 // ============================================================================

@@ -22,7 +22,7 @@ describe('Environment Separation', () => {
     it('should enable redirection and simulation in development by default', () => {
       process.env.NODE_ENV = 'development';
       process.env.TEST_RECIPIENT_EMAIL = 'test@example.com';
-      
+
       expect(shouldRedirectEmails()).toBe(true);
       expect(shouldSimulateVerifier()).toBe(true);
       expect(getTestRecipientEmail()).toBe('test@example.com');
@@ -30,7 +30,7 @@ describe('Environment Separation', () => {
 
     it('should disable redirection and simulation in production', () => {
       process.env.NODE_ENV = 'production';
-      
+
       expect(shouldRedirectEmails()).toBe(false);
       expect(shouldSimulateVerifier()).toBe(false);
     });
@@ -39,7 +39,7 @@ describe('Environment Separation', () => {
       process.env.NODE_ENV = 'development';
       process.env.REDIRECT_EMAILS = 'false';
       process.env.SIMULATE_VERIFIER = 'false';
-      
+
       expect(shouldRedirectEmails()).toBe(true); // Redirection is now ALWAYS enabled in dev
       expect(shouldSimulateVerifier()).toBe(false); // Verifier can still be toggled
     });
@@ -47,7 +47,7 @@ describe('Environment Separation', () => {
     it('should throw error if TEST_RECIPIENT_EMAIL is missing in development when redirection is enabled', () => {
       process.env.NODE_ENV = 'development';
       delete process.env.TEST_RECIPIENT_EMAIL;
-      
+
       expect(() => getTestRecipientEmail()).toThrow('TEST_RECIPIENT_EMAIL must be configured when not in production');
     });
   });
@@ -57,27 +57,24 @@ describe('Environment Separation', () => {
       process.env.NODE_ENV = 'development';
       process.env.TEST_RECIPIENT_EMAIL = 'test-recipient@example.com';
       process.env.SES_FROM_EMAIL = 'sender@example.com';
-      
+
       // Mock SES client
+      // Mock SES client compatible with SendRawEmailCommand
       const mockSesClient = {
-        send: async (command: any) => {
-          const input = command.input;
-          return { 
+        send: async (_command: unknown) => {
+          return {
             MessageId: 'msg-123',
-            // Verify redirected values
-            _sentTo: input.Destination.ToAddresses[0],
-            _sentSubject: input.Message.Subject.Data
           };
         }
       } as any;
 
       const controller = getEmailThrottleController();
       spyOn(controller, 'checkQuota').mockImplementation(async () => true);
-      spyOn(controller, 'acquireSendPermission').mockImplementation(async () => {});
-      
+      spyOn(controller, 'acquireSendPermission').mockImplementation(async () => { });
+
       // We need to bypass the real sendWithRetry or mock the client deeply
       // Since sendEmail calls sendWithRetry which calls client.send, we can just mock the client.
-      
+
       const result = await sendEmail(
         { to: 'real-customer@gmail.com', subject: 'Hello', htmlBody: '...', textBody: '...' },
         controller,
@@ -97,9 +94,9 @@ describe('Environment Separation', () => {
     it('should return simulated response in development', async () => {
       process.env.NODE_ENV = 'development';
       process.env.SIMULATE_VERIFIER = 'true';
-      
+
       const result = await verifyEmail('test-invalid@example.com');
-      
+
       expect(result.status).toBe('invalid');
       expect(result.message).toContain('Simulated');
     });
@@ -107,11 +104,11 @@ describe('Environment Separation', () => {
     it('should fetch real credits even in development with simulation enabled', async () => {
       process.env.NODE_ENV = 'development';
       process.env.SIMULATE_VERIFIER = 'true';
-      
+
       // When API key is not configured, should return null
       // When API key is configured, should fetch from real API
       const credits = await fetchVerifierCredits();
-      
+
       // Credits should be null when no API key is configured
       // or a real number when API key is present (not the hardcoded 10000)
       expect(credits === null || credits !== 10000).toBe(true);

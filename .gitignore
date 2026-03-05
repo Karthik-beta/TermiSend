@@ -74,3 +74,4 @@ test-output.txt
 .agent/
 .agents/
 contacts-template.xlsx
+*.pdf

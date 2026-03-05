@@ -4,10 +4,9 @@
  */
 
 import {
-  type Body,
   type SESClient,
-  SendEmailCommand,
-  type SendEmailCommandInput,
+  SendRawEmailCommand,
+  type SendRawEmailCommandInput,
 } from '@aws-sdk/client-ses';
 import { getTestRecipientEmail, shouldRedirectEmails } from './config.js';
 import {
@@ -70,6 +69,24 @@ function getSESFromEmail(): string | undefined {
   return process.env.SES_FROM_EMAIL;
 }
 
+function getSESFromName(): string | undefined {
+  return process.env.SES_FROM_NAME;
+}
+
+/**
+ * Format the From address with optional display name per RFC 5322
+ * e.g. "Karthik" <karthik@pivotr.in> or just karthik@pivotr.in
+ */
+function formatFromAddress(email: string): string {
+  const name = getSESFromName();
+  if (name) {
+    // RFC 5322: use quoted display name to handle special characters
+    const safeName = name.replace(/"/g, '\\"');
+    return `"${safeName}" <${email}>`;
+  }
+  return email;
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -81,52 +98,86 @@ function isThrottlingError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false;
   }
-  const err = error as { code?: string; name?: string };
-  const code = err.code || err.name;
-  return (
-    code === 'Throttling' ||
-    code === 'ThrottlingException' ||
-    code === 'ProvisionedThroughputExceededException' ||
-    code === 'RequestLimitExceeded'
-  );
+  const err = error as {
+    code?: string;
+    name?: string;
+    $metadata?: { httpStatusCode?: number };
+  };
+  const errorIdentifier = err.name || err.code;
+
+  // Check for explicit throttling error names
+  const isThrottlingName =
+    errorIdentifier === 'Throttling' ||
+    errorIdentifier === 'ThrottlingException' ||
+    errorIdentifier === 'TooManyRequestsException' ||
+    errorIdentifier === 'ProvisionedThroughputExceededException' ||
+    errorIdentifier === 'RequestLimitExceeded';
+
+  // Also check for HTTP 429 status code
+  const isHttp429 = err.$metadata?.httpStatusCode === 429;
+
+  return isThrottlingName || isHttp429;
 }
 
 /**
- * Prepare message body for SendEmailCommand
+ * Build a raw MIME message for SendRawEmailCommand.
+ * This allows setting custom headers like List-Unsubscribe
+ * which are not supported by SendEmailCommand.
  */
-function prepareMessageBody(params: EmailSendParams): Body {
-  const body: Body = {};
+function buildRawMimeMessage(params: EmailSendParams, fromEmail: string): string {
+  const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const formattedFrom = formatFromAddress(fromEmail);
 
-  if (params.htmlBody) {
-    body.Html = {
-      Data: params.htmlBody,
-      Charset: 'UTF-8',
-    };
-  }
+  const headers = [
+    `From: ${formattedFrom}`,
+    `To: ${params.to}`,
+    `Subject: ${params.subject}`,
+    'MIME-Version: 1.0',
+    `List-Unsubscribe: <mailto:${fromEmail}?subject=unsubscribe>`,
+    'List-Unsubscribe-Post: List-Unsubscribe=One-Click',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
 
+  const parts: string[] = [];
+
+  // Plain text part
   if (params.textBody) {
-    body.Text = {
-      Data: params.textBody,
-      Charset: 'UTF-8',
-    };
+    parts.push(
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      params.textBody
+    );
   }
 
-  return body;
+  // HTML part
+  if (params.htmlBody) {
+    parts.push(
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      params.htmlBody
+    );
+  }
+
+  parts.push(`--${boundary}--`);
+
+  return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`;
 }
 
 /**
- * Construct the input for the SendEmailCommand
+ * Construct the input for SendRawEmailCommand
  */
-function constructSendEmailInput(
+function constructSendRawEmailInput(
   params: EmailSendParams,
   fromEmail: string
-): SendEmailCommandInput {
+): SendRawEmailCommandInput {
+  const rawMessage = buildRawMimeMessage(params, fromEmail);
   return {
-    Source: fromEmail,
-    Destination: { ToAddresses: [params.to] },
-    Message: {
-      Subject: { Data: params.subject, Charset: 'UTF-8' },
-      Body: prepareMessageBody(params),
+    RawMessage: {
+      Data: new TextEncoder().encode(rawMessage),
     },
   };
 }
@@ -137,7 +188,7 @@ function constructSendEmailInput(
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Retry logic needs complexity - refactoring risk outweighs benefit
 async function sendWithRetry(
   sesClient: SESClient,
-  input: SendEmailCommandInput,
+  input: SendRawEmailCommandInput,
   params: EmailSendParams,
   controller: EmailThrottleController
 ): Promise<EmailSendResult> {
@@ -163,10 +214,10 @@ async function sendWithRetry(
 
     try {
       if (attempt === 0) {
-        await logger.logAwsSesRequest(params.to, { from: input.Source, subject: params.subject });
+        await logger.logAwsSesRequest(params.to, { subject: params.subject });
       }
 
-      const response = await sesClient.send(new SendEmailCommand(input));
+      const response = await sesClient.send(new SendRawEmailCommand(input));
       if (!response.MessageId) {
         throw new Error('No MessageId returned');
       }
@@ -266,7 +317,7 @@ export function sendEmail(
   if (shouldRedirectEmails()) {
     try {
       finalTo = getTestRecipientEmail();
-      finalSubject = `[DEV: ${params.to}] ${params.subject}`;
+      finalSubject = params.subject;
     } catch (error) {
       return Promise.resolve({
         success: false,
@@ -275,7 +326,7 @@ export function sendEmail(
     }
   }
 
-  const sendEmailInput = constructSendEmailInput(
+  const sendEmailInput = constructSendRawEmailInput(
     {
       ...params,
       to: finalTo,
