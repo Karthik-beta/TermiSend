@@ -574,3 +574,9 @@ describe('Database Module', () => {
     });
   });
 });
+
+import { afterAll } from "bun:test";
+afterAll(() => {
+  mock.restore();
+});
+

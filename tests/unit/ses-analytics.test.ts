@@ -9,6 +9,18 @@ import { beforeEach, describe, expect, it, mock, spyOn, type Mock } from 'bun:te
 // Mock Setup - Must be defined before importing the module under test
 // ============================================================================
 
+// Mock the logger module to avoid spyOn issues with accessor properties
+mock.module('../../src/logger.js', () => ({
+  logger: {
+    info: mock(() => Promise.resolve()),
+    warn: mock(() => Promise.resolve()),
+    error: mock(() => Promise.resolve()),
+    debug: mock(() => Promise.resolve()),
+    logEvent: mock(() => Promise.resolve()),
+    logError: mock(() => Promise.resolve()),
+  }
+}));
+
 // Mock the AWS SES SDK
 const mockGetSendQuota = mock(() =>
   Promise.resolve({
@@ -147,10 +159,13 @@ import { restoreEnv, setMockEnv, wait } from '../helpers/test-utils.js';
 // ============================================================================
 
 describe('SES Analytics Module', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Wait for any pending async event persistence from previous tests
+    await wait(50);
+
     // Reset state
     awsSdkCallCount = 0;
-    awsSdkCalls = [];
+    awsSdkCalls.length = 0;
 
     // Reset mocks
     mockGetSendQuota.mockClear();
@@ -165,12 +180,6 @@ describe('SES Analytics Module', () => {
     spyOn(sesQuotaModule, 'getSesClient').mockReturnValue(
       mockSesClient as ReturnType<typeof sesQuotaModule.getSesClient>
     );
-
-    // Mock logger to prevent test noise
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logEvent').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logError').mockImplementation(() => Promise.resolve());
 
     // Set environment for tests
     setMockEnv({
@@ -397,15 +406,15 @@ describe('SES Analytics Module', () => {
       // Make first request
       await fetchQuotaSnapshot();
 
-      // Wait longer than the rate limit
-      await wait(150);
+      // Wait longer than the rate limit (1000ms default)
+      await wait(1100);
 
       // Second request should not be delayed significantly
       const startTime = Date.now();
       await fetchQuotaSnapshot();
       const elapsed = Date.now() - startTime;
 
-      // Should complete quickly since we waited (allowing for timing variance)
+      // Should complete quickly since we waited longer than rate limit
       expect(elapsed).toBeLessThan(200);
     });
 
@@ -733,9 +742,14 @@ describe('SES Analytics Module', () => {
     });
 
     it('should handle missing verification attributes', async () => {
-      // Reset call count for this test
-      awsSdkCalls.length = 0;
+      // Mock list identities to return known identities
+      mockListIdentities.mockImplementation(() =>
+        Promise.resolve({
+          Identities: ['test@example.com', 'example.com'],
+        })
+      );
 
+      // Mock empty verification attributes
       mockGetIdentityVerificationAttributes.mockImplementation(() =>
         Promise.resolve({
           VerificationAttributes: {},
@@ -964,11 +978,13 @@ describe('SES Analytics Module', () => {
 
   describe('storeMessageEvent()', () => {
     it('should store message event to database', async () => {
+      // Create a unique event to identify this test's call
+      const uniqueEventId = 'test-event-unique-id';
       const createMessageEventSpy = spyOn(dbModule, 'createMessageEvent').mockImplementation(() =>
         Promise.resolve({
           id: 1,
           eventType: 'SEND',
-          messageId: 'msg-123',
+          messageId: uniqueEventId,
           contactId: 'contact-456',
           sendLogId: 'log-789',
           eventData: { status: 'sent' },
@@ -979,7 +995,7 @@ describe('SES Analytics Module', () => {
 
       const event: MessageEvent = {
         eventType: 'SEND',
-        messageId: 'msg-123',
+        messageId: uniqueEventId,
         contactId: 'contact-456',
         sendLogId: 'log-789',
         eventData: { status: 'sent' },
@@ -988,9 +1004,18 @@ describe('SES Analytics Module', () => {
 
       await storeMessageEvent(event);
 
-      // Verify the function was called with the correct event
+      // Verify the function was called - check for our unique event
+      // (Note: spy may have calls from async event persistence of previous tests)
       expect(createMessageEventSpy).toHaveBeenCalled();
-      expect(createMessageEventSpy.mock.calls[0][0]).toEqual(event);
+      const matchingCall = createMessageEventSpy.mock.calls.find(
+        (call) => (call[0] as MessageEvent).messageId === uniqueEventId
+      );
+      expect(matchingCall).toBeDefined();
+      const callArg = matchingCall![0] as MessageEvent;
+      expect(callArg.eventType).toBe(event.eventType);
+      expect(callArg.contactId).toBe(event.contactId);
+      expect(callArg.sendLogId).toBe(event.sendLogId);
+      expect(callArg.eventData).toEqual(event.eventData);
     });
 
     it('should throw on database error', async () => {
@@ -1155,6 +1180,15 @@ describe('SES Analytics Module', () => {
     beforeEach(() => {
       __test.resetRateLimiter();
 
+      // Reset mock to return valid quota data
+      mockGetSendQuota.mockImplementation(() =>
+        Promise.resolve({
+          Max24HourSend: 1000,
+          MaxSendRate: 14,
+          SentLast24Hours: 100,
+        })
+      );
+
       spyOn(dbModule, 'createQuotaSnapshot').mockImplementation(() =>
         Promise.resolve({
           id: 1,
@@ -1282,3 +1316,9 @@ describe('SES Analytics Module', () => {
     });
   });
 });
+
+import { afterAll } from "bun:test";
+afterAll(() => {
+  mock.restore();
+});
+

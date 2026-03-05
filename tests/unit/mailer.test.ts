@@ -95,16 +95,16 @@ describe('Mailer Module', () => {
   });
 
   describe('processTemplate()', () => {
-    it('should replace Person Name placeholder', () => {
-      const template = 'Hello {Person Name}';
+    it('should replace Name placeholder', () => {
+      const template = 'Hello [Name]';
       const contact = createMockContact({ personName: 'John' });
       const result = processTemplate(template, contact);
 
       expect(result).toContain('Hello John');
     });
 
-    it('should replace Company Name placeholder', () => {
-      const template = 'Welcome to {Company Name}';
+    it('should replace Company-Name placeholder', () => {
+      const template = 'Welcome to [Company-Name]';
       const contact = createMockContact({ companyName: 'Acme Corp' });
       const result = processTemplate(template, contact);
 
@@ -112,7 +112,7 @@ describe('Mailer Module', () => {
     });
 
     it('should process spintax in template', () => {
-      const template = '{Hello|Hi} {Person Name}';
+      const template = '{Hello|Hi} [Name]';
       const contact = createMockContact({ personName: 'Jane' });
       const result = processTemplate(template, contact);
 
@@ -121,7 +121,7 @@ describe('Mailer Module', () => {
     });
 
     it('should replace all placeholders', () => {
-      const template = '{Person Name} from {Company Name}';
+      const template = '[Name] from [Company-Name]';
       const contact = createMockContact({
         personName: 'Alice',
         companyName: 'TechCo',

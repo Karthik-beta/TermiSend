@@ -4,10 +4,19 @@
  */
 
 import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
-import * as loggerModule from '../../src/logger.js';
 import * as configModule from '../../src/config.js';
 import * as sesEventsModule from '../../src/ses-events.js';
 import * as sesEventHandlersModule from '../../src/ses-event-handlers.js';
+
+// Mock the logger module to avoid spyOn issues with accessor properties
+mock.module('../../src/logger.js', () => ({
+  logger: {
+    info: mock(() => Promise.resolve()),
+    warn: mock(() => Promise.resolve()),
+    logError: mock(() => Promise.resolve()),
+    logEvent: mock(() => Promise.resolve()),
+  }
+}));
 import {
   getSQSClient,
   resetSQSClient,
@@ -61,10 +70,6 @@ describe('SQS Consumer Module', () => {
       AWS_REGION: 'us-east-1',
       SQS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/123456789/termisend-queue',
     });
-
-    // Mock logger
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => Promise.resolve());
 
     // Stop consumer if running
     if (isConsumerRunning()) {
@@ -482,3 +487,9 @@ describe('SQS Consumer Module', () => {
     });
   });
 });
+
+import { afterAll } from "bun:test";
+afterAll(() => {
+  mock.restore();
+});
+

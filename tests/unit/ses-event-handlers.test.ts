@@ -3,8 +3,18 @@
  * Tests event processing logic, routing, and database integration
  */
 
-import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import * as loggerModule from '../../src/logger.js';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+
+// Mock the logger module to avoid spyOn issues with accessor properties
+mock.module('../../src/logger.js', () => ({
+  logger: {
+    info: mock(() => Promise.resolve()),
+    warn: mock(() => Promise.resolve()),
+    error: mock(() => Promise.resolve()),
+    debug: mock(() => Promise.resolve()),
+  }
+}));
+
 import * as eventsBusModule from '../../src/events/bus.js';
 import * as dbModule from '../../src/db.js';
 import {
@@ -39,10 +49,6 @@ describe('SES Event Handlers Module', () => {
   };
 
   beforeEach(() => {
-    // Mock logger to prevent test noise
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => Promise.resolve());
-
     // Mock event bus
     spyOn(eventsBusModule, 'emitAnalyticsEvent').mockImplementation(() => {});
 

@@ -3,11 +3,15 @@
  * Tests audit logging with mocked database insertions
  */
 
-import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as dbModule from '../../src/db.js';
-import { logger } from '../../src/logger.js';
+import { AuditLogger } from '../../src/logger.js';
 import type { EventType } from '../../src/types.js';
 import { createMockAuditLog } from '../helpers/mock-factories.js';
+
+// Create real logger instance for testing
+// Other test files mock the logger module with dummy mocks, so we instantiate the real class directly
+const logger = new AuditLogger();
 
 describe('Logger Module', () => {
   let insertAuditLogSpy: ReturnType<typeof spyOn>;
@@ -17,7 +21,7 @@ describe('Logger Module', () => {
     insertAuditLogSpy = spyOn(dbModule, 'insertAuditLog').mockImplementation(() =>
       Promise.resolve(createMockAuditLog())
     );
-    consoleErrorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    consoleErrorSpy = spyOn(console, 'error').mockImplementation(() => { });
   });
 
   describe('AuditLogger.logEvent()', () => {
@@ -224,19 +228,20 @@ describe('Logger Module', () => {
     });
   });
 
-  describe('AuditLogger.logContactUpdated()', () => {
-    it('should log contact status update with redacted email (security)', async () => {
+  describe('AuditLogger.logSendLogUpdated()', () => {
+    it('should log send log status update with redacted email (security)', async () => {
       // Arrange
       // Act
-      await logger.logContactUpdated('test@example.com', 'pending', 'sent');
+      await logger.logSendLogUpdated('log-12345', 'pending', 'sent', { email: 'test@example.com' });
 
       // Assert - email should be redacted for privacy
       expect(insertAuditLogSpy).toHaveBeenCalledWith(
-        'CONTACT_UPDATED',
+        'SEND_LOG_UPDATED',
         expect.objectContaining({
-          email: 't***@e******.com', // Redacted email
+          logId: 'log-12345',
           oldStatus: 'pending',
           newStatus: 'sent',
+          email: 't***@e******.com', // Redacted email
           timestamp: expect.any(String),
         })
       );
@@ -443,14 +448,14 @@ describe('Logger Module', () => {
         expect(payload.email).not.toContain('user');
       });
 
-      it('should redact email in contact update logs', async () => {
+      it('should redact email in send log update logs', async () => {
         const email = 'contact@business.net';
 
-        await logger.logContactUpdated(email, 'pending', 'sent');
+        await logger.logSendLogUpdated('log-12345', 'pending', 'sent', { email });
 
         expect(insertAuditLogSpy).toHaveBeenCalled();
         const callArgs = insertAuditLogSpy.mock.calls[0];
-        expect(callArgs[0]).toBe('CONTACT_UPDATED');
+        expect(callArgs[0]).toBe('SEND_LOG_UPDATED');
         const payload = callArgs[1] as Record<string, unknown>;
 
         expect(payload.email).toBe('c******@b*******.net');
@@ -507,7 +512,7 @@ describe('Logger Module', () => {
         await logger.logApiVerifierResponse(email, { status: 'valid' });
         await logger.logAwsSesRequest(email, { subject: 'Test' });
         await logger.logAwsSesResponse(email, 'msg-123');
-        await logger.logContactUpdated(email, 'pending', 'sent');
+        await logger.logSendLogUpdated('log-12345', 'pending', 'sent', { email });
 
         // Check all calls for original email
         expect(insertAuditLogSpy.mock.calls.length).toBeGreaterThanOrEqual(5);

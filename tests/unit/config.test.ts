@@ -157,6 +157,13 @@ describe('Configuration Module', () => {
   describe('getThrottleConfig()', () => {
     it('should return default values when no environment variables are set', () => {
       // Arrange
+      setMockEnv({
+        THROTTLE_MIN_DELAY_MS: '',
+        THROTTLE_MAX_DELAY_MS: '',
+        THROTTLE_BREAK_PROBABILITY_PERCENT: '',
+        THROTTLE_BREAK_MIN_MINUTES: '',
+        THROTTLE_BREAK_MAX_MINUTES: '',
+      });
       resetEnvCacheForTesting();
 
       // Act
@@ -684,7 +691,7 @@ describe('Configuration Module', () => {
       const config1 = getThrottleConfig();
       const rate1 = getSesRateLimit();
       const buffer1 = getQuotaBufferPercent();
-resetEnvCacheForTesting();
+      resetEnvCacheForTesting();
 
 
       const config2 = getThrottleConfig();

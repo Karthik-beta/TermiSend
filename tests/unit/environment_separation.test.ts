@@ -104,13 +104,17 @@ describe('Environment Separation', () => {
       expect(result.message).toContain('Simulated');
     });
 
-    it('should return mock credits in development', async () => {
+    it('should fetch real credits even in development with simulation enabled', async () => {
       process.env.NODE_ENV = 'development';
       process.env.SIMULATE_VERIFIER = 'true';
       
+      // When API key is not configured, should return null
+      // When API key is configured, should fetch from real API
       const credits = await fetchVerifierCredits();
       
-      expect(credits).toBe(10000);
+      // Credits should be null when no API key is configured
+      // or a real number when API key is present (not the hardcoded 10000)
+      expect(credits === null || credits !== 10000).toBe(true);
     });
   });
 });

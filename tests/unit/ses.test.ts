@@ -3,10 +3,41 @@
  * Tests email sending with mocked AWS SDK including failure simulations
  */
 
-import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as dbModule from '../../src/db.js';
-import * as loggerModule from '../../src/logger.js';
 import * as throttleModule from '../../src/throttle.js';
+
+// Mock the logger module to avoid spyOn issues with accessor properties
+mock.module('../../src/logger.js', () => ({
+  logger: {
+    logEvent: mock(() => Promise.resolve()),
+    logUserInput: mock(() => Promise.resolve()),
+    logExcelImportStart: mock(() => Promise.resolve()),
+    logExcelImportRowValid: mock(() => Promise.resolve()),
+    logExcelImportRowInvalid: mock(() => Promise.resolve()),
+    logExcelImportComplete: mock(() => Promise.resolve()),
+    logApiVerifierRequest: mock(() => Promise.resolve()),
+    logApiVerifierResponse: mock(() => Promise.resolve()),
+    logAwsSesRequest: mock(() => Promise.resolve()),
+    logAwsSesResponse: mock(() => Promise.resolve()),
+    logSendLogUpdated: mock(() => Promise.resolve()),
+    logError: mock(() => Promise.resolve()),
+    info: mock(() => Promise.resolve()),
+    warn: mock(() => Promise.resolve()),
+  },
+  logEvent: mock(() => Promise.resolve()),
+  logUserInput: mock(() => Promise.resolve()),
+  logExcelImportStart: mock(() => Promise.resolve()),
+  logExcelImportRowValid: mock(() => Promise.resolve()),
+  logExcelImportRowInvalid: mock(() => Promise.resolve()),
+  logExcelImportComplete: mock(() => Promise.resolve()),
+  logApiVerifierRequest: mock(() => Promise.resolve()),
+  logApiVerifierResponse: mock(() => Promise.resolve()),
+  logAwsSesRequest: mock(() => Promise.resolve()),
+  logAwsSesResponse: mock(() => Promise.resolve()),
+  logSendLogUpdated: mock(() => Promise.resolve()),
+  logError: mock(() => Promise.resolve()),
+}));
 import {
   sendTestEmail,
   sendEmail,
@@ -43,13 +74,7 @@ describe('SES Module', () => {
     // Set up mock SES client to prevent real AWS calls
     sesTest.setSesClient(getMockSESClient());
 
-    // Mock logger to prevent test noise
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logAwsSesRequest').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logAwsSesResponse').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logError').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'logContactUpdated').mockImplementation(() => Promise.resolve());
+    // Logger is mocked at module level to prevent test noise
     
     // Mock delay to speed up tests that involve retries
     spyOn(throttleModule, 'delay').mockImplementation(() => Promise.resolve());

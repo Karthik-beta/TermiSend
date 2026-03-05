@@ -192,7 +192,7 @@ describe('resetDatabase()', () => {
       mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join('');
         if (query.includes('information_schema.tables')) {
-          return Promise.resolve([{ table_name: 'contacts' }, { table_name: 'send_logs' }]);
+          return Promise.resolve([{ tableName: 'contacts' }, { tableName: 'send_logs' }]);
         }
         return Promise.resolve([]);
       });
@@ -215,7 +215,7 @@ describe('resetDatabase()', () => {
       mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join('');
         if (query.includes('information_schema.tables')) {
-          return Promise.resolve([{ table_name: 'contacts' }, { table_name: 'send_logs' }]);
+          return Promise.resolve([{ tableName: 'contacts' }, { tableName: 'send_logs' }]);
         }
         return Promise.resolve([]);
       });
@@ -365,3 +365,9 @@ describe('Security: Impossible to accidentally reset production', () => {
     });
   });
 });
+
+import { afterAll } from "bun:test";
+afterAll(() => {
+  mock.restore();
+});
+

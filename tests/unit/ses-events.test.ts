@@ -3,8 +3,7 @@
  * Tests SNS notification parsing, SES event parsing, and type guards
  */
 
-import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import * as loggerModule from '../../src/logger.js';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
   parseSNSNotification,
   parseSESEventRecord,
@@ -45,11 +44,41 @@ import {
   createSNSNotification,
 } from '../fixtures/ses-events.js';
 
+// Mock the logger module to avoid spyOn issues with accessor properties
+mock.module('../../src/logger.js', () => ({
+  logger: {
+    logEvent: mock(() => Promise.resolve()),
+    logUserInput: mock(() => Promise.resolve()),
+    logExcelImportStart: mock(() => Promise.resolve()),
+    logExcelImportRowValid: mock(() => Promise.resolve()),
+    logExcelImportRowInvalid: mock(() => Promise.resolve()),
+    logExcelImportComplete: mock(() => Promise.resolve()),
+    logApiVerifierRequest: mock(() => Promise.resolve()),
+    logApiVerifierResponse: mock(() => Promise.resolve()),
+    logAwsSesRequest: mock(() => Promise.resolve()),
+    logAwsSesResponse: mock(() => Promise.resolve()),
+    logSendLogUpdated: mock(() => Promise.resolve()),
+    logError: mock(() => Promise.resolve()),
+    info: mock(() => Promise.resolve()),
+    warn: mock(() => Promise.resolve()),
+  },
+  logEvent: mock(() => Promise.resolve()),
+  logUserInput: mock(() => Promise.resolve()),
+  logExcelImportStart: mock(() => Promise.resolve()),
+  logExcelImportRowValid: mock(() => Promise.resolve()),
+  logExcelImportRowInvalid: mock(() => Promise.resolve()),
+  logExcelImportComplete: mock(() => Promise.resolve()),
+  logApiVerifierRequest: mock(() => Promise.resolve()),
+  logApiVerifierResponse: mock(() => Promise.resolve()),
+  logAwsSesRequest: mock(() => Promise.resolve()),
+  logAwsSesResponse: mock(() => Promise.resolve()),
+  logSendLogUpdated: mock(() => Promise.resolve()),
+  logError: mock(() => Promise.resolve()),
+}));
+
 describe('SES Events Module', () => {
   beforeEach(() => {
-    // Mock logger to prevent test noise
-    spyOn(loggerModule.logger, 'info').mockImplementation(() => Promise.resolve());
-    spyOn(loggerModule.logger, 'warn').mockImplementation(() => Promise.resolve());
+    // Logger is mocked at module level to prevent test noise
   });
 
   // ============================================================================

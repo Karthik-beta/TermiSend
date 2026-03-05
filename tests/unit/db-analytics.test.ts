@@ -892,3 +892,9 @@ describe('Database Analytics Functions', () => {
     });
   });
 });
+
+import { afterAll } from "bun:test";
+afterAll(() => {
+  mock.restore();
+});
+

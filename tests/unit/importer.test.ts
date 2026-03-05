@@ -3,7 +3,7 @@
  * Tests Excel file import with mocked filesystem and database
  */
 
-import { beforeEach, describe, expect, it, mock, spyOn, type Mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock, spyOn, type Mock } from 'bun:test';
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import ExcelJS from 'exceljs';
@@ -382,4 +382,8 @@ describe('Importer Module', () => {
       expect(result.successCount).toBe(0);
     });
   });
+});
+
+afterAll(() => {
+  mock.restore();
 });
