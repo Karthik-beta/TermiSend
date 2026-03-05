@@ -439,96 +439,15 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_analytics_events_campaign_id ON analytics_events(campaign_id)
     `;
 
-    // Create verification_metrics table
-    await sql`
-      CREATE TABLE IF NOT EXISTS verification_metrics (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        date DATE NOT NULL,
-        total_verified INTEGER NOT NULL DEFAULT 0,
-        valid_emails INTEGER NOT NULL DEFAULT 0,
-        invalid_emails INTEGER NOT NULL DEFAULT 0,
-        unknown_emails INTEGER NOT NULL DEFAULT 0,
-        average_response_time_ms DECIMAL(10,2),
-        api_calls INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(date)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_verification_metrics_date ON verification_metrics(date)
-    `;
-
-    // Create send_outcome_metrics table
-    await sql`
-      CREATE TABLE IF NOT EXISTS send_outcome_metrics (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        date DATE NOT NULL,
-        campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL,
-        total_requested INTEGER NOT NULL DEFAULT 0,
-        successfully_sent INTEGER NOT NULL DEFAULT 0,
-        failed_sends INTEGER NOT NULL DEFAULT 0,
-        skipped_sends INTEGER NOT NULL DEFAULT 0,
-        average_send_time_ms DECIMAL(10,2),
-        ses_api_calls INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(date, campaign_id)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_send_outcome_metrics_date ON send_outcome_metrics(date)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_send_outcome_metrics_campaign_id ON send_outcome_metrics(campaign_id)
-    `;
-
-    // Create ses_api_metrics table
-    await sql`
-      CREATE TABLE IF NOT EXISTS ses_api_metrics (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        date DATE NOT NULL,
-        api_endpoint VARCHAR(50) NOT NULL,
-        total_calls INTEGER NOT NULL DEFAULT 0,
-        successful_calls INTEGER NOT NULL DEFAULT 0,
-        failed_calls INTEGER NOT NULL DEFAULT 0,
-        average_response_time_ms DECIMAL(10,2),
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(date, api_endpoint)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_ses_api_metrics_date ON ses_api_metrics(date)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_ses_api_metrics_endpoint ON ses_api_metrics(api_endpoint)
-    `;
-
-    // Create throttling_metrics table
-    await sql`
-      CREATE TABLE IF NOT EXISTS throttling_metrics (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        date DATE NOT NULL,
-        total_delays INTEGER NOT NULL DEFAULT 0,
-        total_delay_time_ms BIGINT NOT NULL DEFAULT 0,
-        average_delay_ms DECIMAL(10,2) DEFAULT 0,
-        quota_checks_passed INTEGER NOT NULL DEFAULT 0,
-        quota_checks_failed INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(date)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_throttling_metrics_date ON throttling_metrics(date)
-    `;
-
     // Success message for CLI usage
-    if (require.main === module || process.argv[1]?.includes('db.ts')) {
-      const dbConfig = getDbConfig();
-      logger.info('✅ Database initialized successfully!');
-      logger.info(`   Database: ${dbConfig.database}`);
-      logger.info(
-        '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events, verification_metrics, send_outcome_metrics, ses_api_metrics, throttling_metrics'
-      );
-    }
+
+    // Always show success message when run from CLI (detected by checking if db.ts is the entry point)
+    const dbConfig = getDbConfig();
+    console.log('✅ Database initialized successfully!');
+    console.log(`   Database: ${dbConfig.database}`);
+    console.log(
+      '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events'
+    );
   } catch (error) {
     throw new Error(
       `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
@@ -590,19 +509,15 @@ export async function getContacts(): Promise<Contact[]> {
 /**
  * Get contacts that are eligible for sending
  * A contact is eligible if:
- * 1. It has no successful 'sent' log entry for the specified campaign (or any if campaignId is null)
+ * 1. It has no successful 'sent' log entry (globally, across all sessions)
  * 2. It has no 'CONTACT_INVALID' or 'CONTACT_DEEMED_UNSAFE' events in analytics
  * 3. It has no failed log entry with retry_count >= 2 (max retries reached)
  * 4. Failed entries with retry_count < 2 ARE eligible for retry
  *
- * @param campaignId - Optional campaign ID to filter by
  * @param limit - Maximum number of contacts to return (default: 1000)
  * @returns Array of eligible contacts
  */
-export async function getEligibleContacts(
-  campaignId: string | null = null,
-  limit: number = 1000
-): Promise<Contact[]> {
+export async function getEligibleContacts(limit: number = 1000): Promise<Contact[]> {
   return await sql<Contact[]>`
     SELECT c.* FROM contacts c
     WHERE NOT EXISTS (
@@ -614,14 +529,12 @@ export async function getEligibleContacts(
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'sent'
-      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'failed'
       AND sl.retry_count >= 2
-      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
     ORDER BY c.created_at ASC
     LIMIT ${limit}
@@ -631,12 +544,11 @@ export async function getEligibleContacts(
 /**
  * Get count of eligible contacts for sending
  * A contact is eligible if:
- * 1. It has no successful 'sent' log entry for the specified campaign
+ * 1. It has no successful 'sent' log entry (globally, across all sessions)
  * 2. It has no 'CONTACT_INVALID' or 'CONTACT_DEEMED_UNSAFE' events in analytics
  * 3. It has no failed log entry with retry_count >= 2 (max retries reached)
- * @param campaignId - Optional campaign ID to filter by
  */
-export async function getEligibleContactCount(campaignId: string | null = null): Promise<number> {
+export async function getEligibleContactCount(): Promise<number> {
   const [result] = await sql<{ count: string }[]>`
     SELECT COUNT(*) as count FROM contacts c
     WHERE NOT EXISTS (
@@ -648,14 +560,12 @@ export async function getEligibleContactCount(campaignId: string | null = null):
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'sent'
-      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'failed'
       AND sl.retry_count >= 2
-      AND (${campaignId}::UUID IS NULL OR sl.campaign_id = ${campaignId}::UUID)
     )
   `;
   return Number.parseInt(result.count || '0', 10);
@@ -910,15 +820,44 @@ export async function getAuditLogs(eventType?: string, limit: number = 100): Pro
 
 /**
  * Get the current MyEmailVerifier credits
- * Returns the most recent credits record, or null if none exists
+ * Returns the most recent credits record from the database, or fetches from API if none exists
+ * When the database is empty, this will fetch from the API and store the result
  */
 export async function getEmailVerifierCredits(): Promise<EmailVerifierCredits | null> {
+  // First try to get from database
   const [credits] = await sql<EmailVerifierCredits[]>`
     SELECT * FROM email_verifier_credits
     ORDER BY updated_at DESC
     LIMIT 1
   `;
-  return credits || null;
+
+  if (credits) {
+    return credits;
+  }
+
+  // Database is empty - fetch from API and store the result
+  // Using dynamic import to avoid circular dependency with verifier.ts
+  try {
+    const { fetchVerifierCredits } = await import('./verifier.js');
+    const apiCredits = await fetchVerifierCredits();
+
+    if (apiCredits !== null) {
+      // Store in database for future calls
+      const result = await updateEmailVerifierCredits(apiCredits);
+      return result;
+    }
+
+    // API returned null (key missing or error) - store 0 credits to prevent repeated API calls
+    // Credits will be updated when a successful verification triggers syncCreditsAfterVerification()
+    const result = await updateEmailVerifierCredits(0);
+    return result;
+  } catch (error) {
+    // Log but don't throw - we'll return null if API fetch fails
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await logger.warn('Failed to fetch credits from API as fallback', { error: errorMessage });
+  }
+
+  return null;
 }
 
 /**
@@ -1040,47 +979,64 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
   console.warn(`⚠️  Environment: ${process.env.NODE_ENV || 'development'}`);
   console.warn('⚠️  This action cannot be undone!\n');
 
+  // Diagnostic logging to confirm execution is proceeding
+  console.log('→ Checking for existing tables...');
+
   try {
     // List of all tables that should be reset
     // IMPORTANT: When new tables are added to the database schema, they must be
     // added to this list to ensure complete database resets.
     const expectedTables = [
-      'contacts',
-      'send_logs',
+      'analytics_events',
       'audit_logs',
+      'campaigns',
+      'contact_suppressions',
+      'contacts',
       'email_verifier_credits',
-      'ses_quota_snapshots',
-      'ses_send_statistics',
+      'send_logs',
+      'ses_event_tracking',
       'ses_identity_status',
       'ses_message_events',
-      'ses_event_tracking',
-      'contact_suppressions',
-      'analytics_events',
-      'verification_metrics',
-      'send_outcome_metrics',
-      'ses_api_metrics',
-      'throttling_metrics',
+      'ses_quota_snapshots',
+      'ses_send_statistics',
     ];
 
     // Query which tables actually exist in the database
-    const existingTables = await sql<{ table_name: string }[]>`
-      SELECT table_name
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-      AND table_name IN ${sql(expectedTables)}
-    `;
+    console.log('→ Querying information_schema for tables...');
+
+    let existingTables: { tableName: string }[];
+    try {
+      existingTables = await sql<{ tableName: string }[]>`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_name IN ${sql(expectedTables)}
+      `;
+      console.log(`→ Found ${existingTables.length} tables in database`);
+    } catch (queryError) {
+      console.error(
+        '→ SQL query failed:',
+        queryError instanceof Error ? queryError.message : String(queryError)
+      );
+      throw new Error(
+        `Failed to query existing tables: ${queryError instanceof Error ? queryError.message : String(queryError)}`
+      );
+    }
 
     const existingTableNames = existingTables
-      .map((t) => t.table_name)
+      .map((t) => t.tableName)
       .filter((name): name is string => typeof name === 'string' && name.length > 0);
 
     if (existingTableNames.length === 0) {
       // No tables exist yet - schema needs to be initialized
+      console.log('⚠️  No tables found - database may need schema initialization');
       return {
         success: true,
         message: `Database '${dbName}' has no tables to reset. Run initializeSchema() first if needed.`,
       };
     }
+
+    console.log(`→ Truncating ${existingTableNames.length} tables...`);
 
     // Execute truncate with CASCADE to handle any foreign key references
     // RESTART IDENTITY resets auto-increment sequences
@@ -1088,6 +1044,8 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
     // Properly quote table names to handle reserved keywords and special characters
     const quotedTables = existingTableNames.map((name) => `"${name}"`).join(', ');
     await sql.unsafe(`TRUNCATE TABLE ${quotedTables} RESTART IDENTITY CASCADE`);
+
+    console.log('✓ Database reset completed successfully');
 
     return {
       success: true,
@@ -1896,8 +1854,7 @@ async function runStandalone(): Promise<void> {
   // Handle reset command
   if (args[0] === 'reset') {
     try {
-      const result = await resetDatabase();
-      console.log(`\n✅ ${result.message}`);
+      await resetDatabase();
       await closeConnection();
       process.exit(0);
     } catch (error) {
@@ -1917,7 +1874,6 @@ async function runStandalone(): Promise<void> {
   // Default: initialize schema
   try {
     await initializeSchema();
-    console.log('✅ Database initialized successfully');
     await closeConnection();
     process.exit(0);
   } catch (error) {

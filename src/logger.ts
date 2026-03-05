@@ -54,7 +54,7 @@ export interface Logger {
 // Audit Logger Implementation
 // ============================================================================
 
-class AuditLogger implements Logger {
+export class AuditLogger implements Logger {
   /**
    * Generic event logging method
    */
@@ -204,11 +204,15 @@ class AuditLogger implements Logger {
     newStatus: string,
     additionalData?: Record<string, unknown>
   ): Promise<void> {
+    const safeData = additionalData ? { ...additionalData } : {};
+    if (typeof safeData.email === 'string') {
+      safeData.email = redactEmail(safeData.email);
+    }
     await this.logEvent('SEND_LOG_UPDATED', {
       logId,
       oldStatus,
       newStatus,
-      ...additionalData,
+      ...safeData,
     });
   }
 

@@ -264,9 +264,10 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
  * @returns Number of credits remaining, or null if fetch fails
  */
 export async function fetchVerifierCredits(): Promise<number | null> {
-  // Handle simulation in development
+  // Guard: return simulated credits in development/simulation mode
   if (shouldSimulateVerifier()) {
-    return 10000; // Return fixed mock value for simulation
+    await logger.info('SIMULATION: Returning simulated verifier credits');
+    return 9999;
   }
 
   const apiKey = getApiKey();
@@ -324,6 +325,8 @@ async function syncCreditsAfterVerification(): Promise<void> {
       creditsUpdateFailureCount = 0;
       isCreditsUpdateFailing = false;
       await updateEmailVerifierCredits(credits);
+      const { emitAnalyticsEvent } = await import('./events/bus.js');
+      emitAnalyticsEvent({ type: 'verifier:credits_updated', credits });
     }
   } catch (err) {
     // Track consecutive failures and enforce retry limit

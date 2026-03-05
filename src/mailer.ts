@@ -518,7 +518,7 @@ async function verifyContactEmail(
       try {
         emitAnalyticsEvent({
           type: 'contact:verified',
-          id: Number(contact.id),
+          id: contact.id,
           isValid: false,
         });
       } catch {
@@ -539,7 +539,7 @@ async function verifyContactEmail(
       try {
         emitAnalyticsEvent({
           type: 'contact:verified',
-          id: Number(contact.id),
+          id: contact.id,
           isValid: true,
         });
       } catch {
@@ -563,7 +563,7 @@ async function verifyContactEmail(
       try {
         emitAnalyticsEvent({
           type: 'contact:verified',
-          id: Number(contact.id),
+          id: contact.id,
           isValid: false,
         });
       } catch {
@@ -634,7 +634,8 @@ async function handleUnsafeEmail(
   try {
     emitAnalyticsEvent({
       type: 'email:skipped',
-      contactId: Number(contact.id),
+      contactId: contact.id,
+      email: contact.email,
       reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
     });
   } catch {
@@ -740,7 +741,7 @@ async function handleSuccessfulSend(
 
   // Emit analytics event for real-time dashboard
   try {
-    emitAnalyticsEvent({ type: 'email:sent', contactId: Number(contact.id) });
+    emitAnalyticsEvent({ type: 'email:sent', contactId: contact.id, email: contact.email });
   } catch {
     // Silently ignore event emission errors
   }
@@ -809,7 +810,8 @@ async function handleFailedSend(
   try {
     emitAnalyticsEvent({
       type: 'email:failed',
-      contactId: Number(contact.id),
+      contactId: contact.id,
+      email: contact.email,
       error: errorReason,
     });
   } catch {
@@ -893,6 +895,7 @@ async function reportProgress(
  * Process a single contact - send email after verification
  * Creates send log entry before processing and updates it based on outcome
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Legacy function - needs refactoring separately
 async function processContact(
   contact: Contact,
   templateContent: string,
@@ -1252,7 +1255,7 @@ async function executeCampaignLoop(
       break;
     }
 
-    const contacts = await getEligibleContacts(campaignId);
+    const contacts = await getEligibleContacts();
 
     if (contacts.length === 0) {
       if (!continuous) {
@@ -1263,7 +1266,7 @@ async function executeCampaignLoop(
       continue;
     }
 
-    await updateResultTotal(campaignId, result);
+    await updateResultTotal(result);
     await processBatch(
       contacts,
       templateContent,
@@ -1284,7 +1287,7 @@ async function executeCampaignLoop(
 }
 
 async function emitCampaignStarted(campaignId: string, mode: SendMode, templatePath: string) {
-  const initialContacts = await getEligibleContacts(campaignId);
+  const initialContacts = await getEligibleContacts();
   if (initialContacts.length > 0) {
     try {
       const event = createEvent<CampaignStartedPayload>(DomainEventType.CAMPAIGN_STARTED, {
@@ -1322,8 +1325,8 @@ async function waitForLeads(result: CampaignResult, onProgress?: ProgressCallbac
   }
 }
 
-async function updateResultTotal(campaignId: string, result: CampaignResult) {
-  const currentEligibleCount = await getEligibleContactCount(campaignId);
+async function updateResultTotal(result: CampaignResult) {
+  const currentEligibleCount = await getEligibleContactCount();
   result.totalContacts =
     result.sentCount + result.failedCount + result.skippedCount + currentEligibleCount;
 }
