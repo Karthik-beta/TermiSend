@@ -19,6 +19,8 @@ out/
 logs/
 *.log
 npm-debug.log*
+*_output*.txt
+*_out*.txt
 
 # Database
 dump.rdb
@@ -31,6 +33,7 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
+.vs/
 *.swp
 *.swo
 *~
@@ -69,4 +72,5 @@ test-output.txt
 /data
 /prompts
 .agent/
+.agents/
 contacts-template.xlsx

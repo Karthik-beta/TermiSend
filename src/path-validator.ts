@@ -21,7 +21,7 @@ const ALLOWED_DIRECTORIES: string[] = [
 const ALLOWED_IMPORT_EXTENSIONS = ['.xlsx', '.xls'];
 
 /** Allowed file extensions for templates */
-const ALLOWED_TEMPLATE_EXTENSIONS = ['.md', '.markdown', '.txt'];
+const ALLOWED_TEMPLATE_EXTENSIONS = ['.md', '.markdown', '.txt', '.spintax'];
 
 // ============================================================================
 // Validation Result Type
