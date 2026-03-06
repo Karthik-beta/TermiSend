@@ -8,7 +8,7 @@ import {
   SendRawEmailCommand,
   type SendRawEmailCommandInput,
 } from '@aws-sdk/client-ses';
-import { getTestRecipientEmail, shouldRedirectEmails } from './config.js';
+import { getTestRecipientEmail, isListUnsubscribeEnabled, shouldRedirectEmails } from './config.js';
 import {
   createEvent,
   DomainEventType,
@@ -101,6 +101,7 @@ function isThrottlingError(error: unknown): boolean {
   const err = error as {
     code?: string;
     name?: string;
+    // biome-ignore lint/style/useNamingConvention: AWS SDK uses this property name
     $metadata?: { httpStatusCode?: number };
   };
   const errorIdentifier = err.name || err.code;
@@ -133,10 +134,16 @@ function buildRawMimeMessage(params: EmailSendParams, fromEmail: string): string
     `To: ${params.to}`,
     `Subject: ${params.subject}`,
     'MIME-Version: 1.0',
-    `List-Unsubscribe: <mailto:${fromEmail}?subject=unsubscribe>`,
-    'List-Unsubscribe-Post: List-Unsubscribe=One-Click',
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
   ];
+
+  if (isListUnsubscribeEnabled()) {
+    headers.push(
+      `List-Unsubscribe: <mailto:${fromEmail}?subject=unsubscribe%20-%20${encodeURIComponent(params.to)}>`,
+      'List-Unsubscribe-Post: List-Unsubscribe=One-Click'
+    );
+  }
+
+  headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
 
   const parts: string[] = [];
 

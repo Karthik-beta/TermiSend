@@ -129,6 +129,7 @@ export const icons = {
   menu: '≡',
   import: '>>',
   campaign: '>>',
+  analytics: '>>',
   quit: '×',
   back: '<-',
 

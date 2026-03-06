@@ -65,7 +65,7 @@ export {
 // ============================================================================
 
 // Repository type exports
-export type { AnalyticsEventRecord } from './repository.js';
+export type { AnalyticsEventRecord } from '../types.js';
 // Repository functions for analytics querying
 export {
   getEventsByContactId,

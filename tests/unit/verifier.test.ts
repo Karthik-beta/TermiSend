@@ -7,6 +7,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   getVerificationStatusDescription,
   isEmailSafe,
+  mapRawResponseToInternal,
 } from '../../src/verifier.js';
 import { validateEmailVerificationResponse } from '../../src/utils/security.js';
 import type { EmailVerificationResponse } from '../../src/types.js';
@@ -549,4 +550,114 @@ describe('Verifier Module', () => {
     });
   });
 
+  describe('mapRawResponseToInternal()', () => {
+    it('should map a "Valid" status response correctly', () => {
+      const rawResponse = {
+        Address: 'test@example.com',
+        Status: 'Valid',
+        StatusCode: '1',
+        Diagnosis: 'Mailbox Exists and Active',
+        Disposable_Domain: 'false',
+        Free_Domain: 'false',
+        Greylisted: 'false',
+        Role_Based: 'false',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('valid');
+      expect(result.risk).toBe('low');
+      expect(result.email).toBe('test@example.com');
+      expect(result.message).toBe('Mailbox Exists and Active');
+    });
+
+    it('should map an "Invalid" status response correctly', () => {
+      const rawResponse = {
+        Address: 'test@example.com',
+        Status: 'Invalid',
+        StatusCode: '2',
+        Diagnosis: 'No such user',
+        Disposable_Domain: 'false',
+        Free_Domain: 'false',
+        Greylisted: 'false',
+        Role_Based: 'false',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('invalid');
+      expect(result.risk).toBe('high');
+    });
+
+    it('should map a "Disposable_Domain: true" response to disposable status', () => {
+      const rawResponse = {
+        Address: 'test@disposable.com',
+        Status: 'Valid',
+        Diagnosis: 'Mailbox exists',
+        Disposable_Domain: 'true',
+        Role_Based: 'false',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('disposable');
+      expect(result.risk).toBe('high');
+    });
+
+    it('should map a "Role_Based: true" response to role status', () => {
+      const rawResponse = {
+        Address: 'admin@example.com',
+        Status: 'Valid',
+        Diagnosis: 'Mailbox exists',
+        Disposable_Domain: 'false',
+        Role_Based: 'true',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('role');
+      expect(result.risk).toBe('low');
+    });
+
+    it('should map "Catch All" status to catch-all status', () => {
+      const rawResponse = {
+        Address: 'test@catchall.com',
+        Status: 'Catch All',
+        Diagnosis: 'Server accepts all',
+        Disposable_Domain: 'false',
+        Role_Based: 'false',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('catch-all');
+      expect(result.risk).toBe('medium');
+    });
+
+    it('should map "Grey-listed" status to unknown status', () => {
+      const rawResponse = {
+        Address: 'test@greylisted.com',
+        Status: 'Grey-listed',
+        Diagnosis: 'Temporary failure',
+        Disposable_Domain: 'false',
+        Role_Based: 'false',
+      };
+
+      const result = mapRawResponseToInternal(rawResponse);
+
+      expect(result.status).toBe('unknown');
+      expect(result.risk).toBe('medium');
+    });
+
+    it('should handle missing fields gracefully with defaults', () => {
+      const rawResponse = {};
+
+      const result = mapRawResponseToInternal(rawResponse as any);
+
+      expect(result.status).toBe('unknown');
+      expect(result.risk).toBe('medium');
+      expect(result.email).toBeUndefined();
+      expect(result.message).toBeUndefined();
+    });
+  });
 });

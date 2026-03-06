@@ -24,6 +24,7 @@ import { layout } from '../theme.js';
 import type { DashboardView } from '../types.js';
 import { ActivityFeed } from './ActivityFeed.js';
 import { AnalyticsPanel } from './AnalyticsPanel.js';
+import { AnalyticsView } from './AnalyticsView.js';
 import { CampaignBanner } from './CampaignBanner.js';
 import { CampaignForm } from './CampaignForm.js';
 import { Header } from './Header.js';
@@ -151,8 +152,8 @@ export function Dashboard(): React.ReactElement {
       }
     }
 
-    // Escape to go back (not during running campaign)
-    if (key.escape && campaignStatus !== 'running') {
+    // Escape to go back (always allowed so analytics/menu stay reachable)
+    if (key.escape) {
       goToMenu();
     }
   });
@@ -172,6 +173,8 @@ export function Dashboard(): React.ReactElement {
           return <ImportForm onImportComplete={handleImportComplete} />;
         case 'CAMPAIGN':
           return <CampaignForm onCampaignComplete={goToMenu} campaign={campaign} />;
+        case 'ANALYTICS':
+          return <AnalyticsView />;
         default:
           return <Menu onSelect={handleMenuSelect} />;
       }

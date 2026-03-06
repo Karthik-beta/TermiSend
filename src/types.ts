@@ -7,6 +7,8 @@
 // Database Entity Types
 // ============================================================================
 
+import type { DomainEventPayload } from './events/types.js';
+
 /**
  * Represents a contact in the database
  * Contacts are identity-only - send status is tracked in send_logs table
@@ -16,6 +18,22 @@ export interface Contact {
   companyName: string;
   personName: string;
   email: string;
+  createdAt: Date;
+}
+
+/**
+ * Analytics event record as stored in the database
+ */
+export interface AnalyticsEventRecord {
+  id: string;
+  eventType: string;
+  eventId: string;
+  correlationId: string | null;
+  contactId: string | null;
+  sendLogId: string | null;
+  campaignId: string | null;
+  payload: DomainEventPayload;
+  occurredAt: Date;
   createdAt: Date;
 }
 
@@ -879,4 +897,33 @@ export interface EventProcessingResult {
   affectedContactIds: string[];
   /** IDs of updated send logs */
   updatedSendLogIds: string[];
+}
+
+// ============================================================================
+// Periodic Analytics Types
+// ============================================================================
+
+/**
+ * Aggregated statistics for a specific time period
+ */
+export interface PeriodicStats {
+  period: 'daily' | 'weekly' | 'monthly';
+  sent: number;
+  delivered: number;
+  opened: number;
+  clicked: number;
+  failed: number;
+  verified: number;
+  invalid: number;
+  bounced: number;
+  complained: number;
+}
+
+/**
+ * Comprehensive periodic analytics data
+ */
+export interface PeriodicAnalytics {
+  daily: PeriodicStats;
+  weekly: PeriodicStats;
+  monthly: PeriodicStats;
 }

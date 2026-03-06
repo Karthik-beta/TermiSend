@@ -147,7 +147,7 @@ describe('Throttle Module', () => {
       const limiter = new TokenBucketRateLimiter(1, 100);
 
       await limiter.acquire();
-      expect(limiter.getTokenCount()).toBe(0);
+      expect(limiter.getTokenCount()).toBeLessThan(0.1);
 
       const startTime = Date.now();
       await limiter.acquire();
@@ -156,17 +156,17 @@ describe('Throttle Module', () => {
       expect(elapsed).toBeGreaterThanOrEqual(5);
     });
 
-    it('should release tokens back to bucket', async () => {
+    it('should not release tokens back to bucket manually', async () => {
       const limiter = new TokenBucketRateLimiter(3, 10);
 
       await limiter.acquire();
       await limiter.acquire();
-      expect(limiter.getTokenCount()).toBeGreaterThan(0.9);
-      expect(limiter.getTokenCount()).toBeLessThanOrEqual(1.1);
+      const tokensBefore = limiter.getTokenCount();
 
       limiter.release();
-      expect(limiter.getTokenCount()).toBeGreaterThan(1.9);
-      expect(limiter.getTokenCount()).toBeLessThanOrEqual(2.1)
+      const tokensAfter = limiter.getTokenCount();
+      // Should not have jumped by 1, just a slight time-based increase
+      expect(tokensAfter - tokensBefore).toBeLessThan(0.1);
     });
   });
 
@@ -222,10 +222,8 @@ describe('Throttle Module', () => {
       // Use a slightly higher bound to account for timing variations
       expect(resolvedCount).toBeLessThanOrEqual(20);
 
-      // Release tokens to allow remaining acquisitions
-      for (let i = 0; i < 50; i++) {
-        limiter.release();
-      }
+      // Let the rate limiter refill naturally (50 requests at 100/s = ~500ms)
+      await throttleModule.delay(450);
 
       // Wait for all to complete
       await Promise.all(acquirePromises);
@@ -239,7 +237,7 @@ describe('Throttle Module', () => {
     it('should open circuit breaker after 5 consecutive failures', async () => {
       // Mock delay to avoid slow test
       spyOn(throttleModule, 'delay').mockImplementation(() => Promise.resolve());
-      
+
       let callCount = 0;
       spyOn(sesQuotaModule, 'getAccountInfo').mockImplementation(() => {
         callCount++;

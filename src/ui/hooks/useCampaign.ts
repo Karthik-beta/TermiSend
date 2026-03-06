@@ -7,12 +7,18 @@
  * Extension: Add campaign history, scheduling, or A/B testing support
  */
 
-import { useCallback, useRef, useState } from 'react';
-import { getEligibleContactCount, getEligibleContacts } from '../../db.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  getAnalyticsCounts,
+  getEligibleContactCount,
+  getEligibleContacts,
+  getRecentAnalyticsEvents,
+} from '../../db.js';
 import { generatePreview, runCampaign } from '../../mailer.js';
 import { isShuttingDown } from '../../shutdown.js';
-import type { CampaignResult, Contact, SendProgress } from '../../types.js';
+import type { AnalyticsEventRecord, CampaignResult, Contact, SendProgress } from '../../types.js';
 import type { CampaignViewStatus, LiveProgress, LogEntry } from '../types.js';
+import { normalizeAnalyticsEventType } from '../utils/analytics.js';
 
 /**
  * Campaign hook return type
@@ -63,6 +69,53 @@ export function useCampaign(): UseCampaignReturn {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   // Queue for pending log entries to prevent race conditions during rapid updates
   const pendingLogEntriesRef = useRef<LogEntry[]>([]);
+
+  // Initial load from database
+  useEffect(() => {
+    let mounted = true;
+
+    async function initializeCampaign() {
+      try {
+        const [counts, recentEvents] = await Promise.all([
+          getAnalyticsCounts(),
+          getRecentAnalyticsEvents(20),
+        ]);
+
+        if (!mounted) {
+          return;
+        }
+
+        // Initialize progress bar
+        const completedCount = counts.sent + counts.failed + counts.invalid;
+        setLiveProgress({
+          currentContact: completedCount,
+          totalContacts: counts.total,
+          currentEmail: '',
+          status: completedCount >= counts.total && counts.total > 0 ? 'completed' : 'verifying',
+          message: counts.total > 0 ? 'Resuming campaign from database' : 'Ready to start',
+        });
+
+        // Set pending count for the dashboard
+        setPendingCount(counts.pending);
+
+        // Map events to log entries for the campaign view
+        const campaignLogs: LogEntry[] = (recentEvents as AnalyticsEventRecord[])
+          .map((event) => mapAnalyticsEventToLogEntry(event))
+          .filter((entry): entry is LogEntry => entry !== null)
+          .reverse();
+
+        setLogEntries(campaignLogs);
+      } catch (_error) {
+        // Silently ignore initialization errors
+      }
+    }
+
+    initializeCampaign();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const loadPendingCount = useCallback(async () => {
     try {
@@ -228,5 +281,34 @@ export function useCampaign(): UseCampaignReturn {
     confirmCampaign,
     reset,
     clearError,
+  };
+}
+
+function mapAnalyticsEventToLogEntry(event: AnalyticsEventRecord): LogEntry | null {
+  const normalized = normalizeAnalyticsEventType(event.eventType);
+  if (!normalized || !['email:sent', 'email:failed', 'email:skipped'].includes(normalized)) {
+    return null;
+  }
+
+  const payload = event.payload as unknown as Record<string, unknown>;
+  const email = String(payload.email || payload.recipientEmail || 'unknown');
+  const status: LogEntry['status'] =
+    normalized === 'email:sent'
+      ? 'completed'
+      : normalized === 'email:skipped'
+        ? 'skipped'
+        : 'failed';
+  const message =
+    normalized === 'email:failed'
+      ? String(payload.error || payload.errorReason || payload.message || '')
+      : normalized === 'email:skipped'
+        ? String(payload.reason || '')
+        : '';
+
+  return {
+    email,
+    status,
+    message,
+    timestamp: new Date(event.occurredAt),
   };
 }

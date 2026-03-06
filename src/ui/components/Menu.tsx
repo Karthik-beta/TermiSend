@@ -22,6 +22,7 @@ interface MenuProps {
 const menuItems: MenuItem[] = [
   { label: `${icons.import} Import Contacts`, value: 'import', shortcut: 'I' },
   { label: `${icons.campaign} Send Campaign`, value: 'campaign', shortcut: 'C' },
+  { label: `${icons.analytics} View Analytics`, value: 'analytics', shortcut: 'A' },
   { label: `${icons.quit} Quit`, value: 'quit', shortcut: 'Q' },
 ];
 

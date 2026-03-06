@@ -172,6 +172,18 @@ export function shouldRedirectEmails(): boolean {
   return true;
 }
 
+/**
+ * Check if the List-Unsubscribe header should be included in emails.
+ * Defaults to true for safety/compliance.
+ */
+export function isListUnsubscribeEnabled(): boolean {
+  const env = getEnv();
+  const enabled = env.ENABLE_LIST_UNSUBSCRIBE || process.env.ENABLE_LIST_UNSUBSCRIBE;
+
+  // Default to true if not explicitly set to 'false'
+  return enabled !== 'false';
+}
+
 // ============================================================================
 // Analytics Configuration
 // ============================================================================

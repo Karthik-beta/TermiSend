@@ -29,8 +29,14 @@ export function Header({
 }: HeaderProps): React.ReactElement {
   const quotaPercent =
     quotaTotal && quotaTotal > 0 && quotaRemaining !== null && quotaRemaining !== undefined
-      ? Math.round(((quotaTotal - quotaRemaining) / quotaTotal) * 100)
+      ? ((quotaTotal - quotaRemaining) / quotaTotal) * 100
       : null;
+  const quotaPercentLabel =
+    quotaPercent === null
+      ? null
+      : quotaPercent > 0 && quotaPercent < 1
+        ? `${quotaPercent.toFixed(2)}%`
+        : `${quotaPercent.toFixed(1)}%`;
 
   return (
     <Box flexDirection="row" paddingX={1}>
@@ -63,7 +69,7 @@ export function Header({
                     : colors.success
               }
             >
-              {quotaPercent}%
+              {quotaPercentLabel}
             </Text>
           </Box>
         )}

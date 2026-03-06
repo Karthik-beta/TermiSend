@@ -16,7 +16,7 @@ import type { CampaignResult, Contact, ImportResult, SendStatus } from '../types
 /**
  * Available dashboard views
  */
-export type DashboardView = 'MENU' | 'IMPORT' | 'CAMPAIGN' | 'RESULTS';
+export type DashboardView = 'MENU' | 'IMPORT' | 'CAMPAIGN' | 'RESULTS' | 'ANALYTICS';
 
 /**
  * Navigation menu item

@@ -26,6 +26,7 @@ export {
   ActivityFeed,
   AnalyticsDashboard,
   AnalyticsPanel,
+  AnalyticsView,
   CampaignBanner,
   CampaignForm,
   CampaignStatus,

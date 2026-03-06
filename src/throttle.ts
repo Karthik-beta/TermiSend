@@ -166,7 +166,7 @@ export class TokenBucketRateLimiter implements RateLimiter {
     this.capacity = capacity;
     this.refillRatePerSecond = refillRatePerSecond;
     this.microTokens = capacity * TokenBucketRateLimiter.MICROTOKENS_PER_TOKEN;
-    this.lastRefillTime = Date.now();
+    this.lastRefillTime = performance.now();
     // Calculate refill interval (one token worth of time)
     this.refillIntervalMs = 1000 / refillRatePerSecond;
   }
@@ -177,7 +177,7 @@ export class TokenBucketRateLimiter implements RateLimiter {
    * Uses integer math to avoid floating point precision issues
    */
   private refill(): void {
-    const now = Date.now();
+    const now = performance.now();
     const elapsedMs = now - this.lastRefillTime;
 
     if (elapsedMs > 0) {
@@ -216,14 +216,17 @@ export class TokenBucketRateLimiter implements RateLimiter {
             request.resolve();
           }
         } else {
-          // No tokens available, need to wait
-          // Calculate wait time based on how many microtokens we need
+          // No tokens available, calculate precisely how long to wait
+          // to get enough tokens for 1 request
           const tokensNeeded =
             (TokenBucketRateLimiter.MICROTOKENS_PER_TOKEN - this.microTokens) /
             TokenBucketRateLimiter.MICROTOKENS_PER_TOKEN;
           const waitTimeMs = Math.max(1, Math.ceil(this.refillIntervalMs * tokensNeeded));
+
+          // Wait for refill interval
           await delay(waitTimeMs);
-          // Continue loop to recalculate
+
+          // Refill after waiting, loop continues
         }
       }
     } finally {
@@ -261,27 +264,12 @@ export class TokenBucketRateLimiter implements RateLimiter {
     });
   }
 
-  /**
-   * Release a token back to the bucket
-   * Note: In token bucket, we typically don't release tokens,
-   * but this allows for flexibility in usage patterns
-   */
   release(): void {
-    // In standard token bucket, tokens are not released back
-    // This method exists for interface compatibility
-    // Optionally add a token back up to capacity (using microtokens)
-    const maxMicroTokens = this.capacity * TokenBucketRateLimiter.MICROTOKENS_PER_TOKEN;
-    this.microTokens = Math.min(
-      maxMicroTokens,
-      this.microTokens + TokenBucketRateLimiter.MICROTOKENS_PER_TOKEN
-    );
-
-    // Wake up the queue processor in case there are pending requests
-    if (this.pendingQueue.length > 0 && !this.processingQueue) {
-      this.processQueue().catch(() => {
-        // Ignore errors in background processing
-      });
-    }
+    // In a token bucket used for strict rate limiting (requests per time),
+    // tokens are NOT released back manually when an operation finishes.
+    // The bucket naturally refills over time.
+    // Manually adding tokens back turns this into a concurrency limiter
+    // (max X active requests) instead of a rate limiter (max X requests/sec).
   }
 
   /**

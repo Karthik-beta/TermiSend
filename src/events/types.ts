@@ -191,6 +191,8 @@ export interface EmailSentPayload {
   mode: 'production' | 'test' | 'dry_run';
   /** Time taken to send in milliseconds */
   sendTimeMs?: number;
+  /** Email address */
+  email?: string;
 }
 
 /**
@@ -221,6 +223,8 @@ export interface EmailFailedPayload {
   failureType?: FailureType;
   /** If true, the campaign should be stopped (critical config errors) */
   stopCampaign?: boolean;
+  /** Email address */
+  email?: string;
 }
 
 /**
@@ -238,6 +242,8 @@ export interface EmailSkippedPayload {
   reason: string;
   /** Skip category */
   skipCategory: 'unsafe_email' | 'dry_run' | 'other';
+  /** Email address */
+  email?: string;
 }
 
 // ============================================================================

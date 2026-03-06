@@ -25,7 +25,7 @@ import {
 // Environment Configuration
 // ============================================================================
 
-const API_BASE_URL = 'https://api.myemailverifier.com/v1';
+const API_BASE_URL = 'https://api.myemailverifier.com/api';
 
 /**
  * Rate limiter for email verification API
@@ -164,6 +164,9 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
     return simulatedResponse;
   }
 
+  let apiCallSuccess = false;
+  let apiCallError: string | undefined;
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error('MYEMAILVERIFIER_API_KEY is not configured');
@@ -172,12 +175,12 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
   // Log the request (email is redacted inside logger)
   await logger.logApiVerifierRequest(email);
 
-  const url = new URL(`${API_BASE_URL}/verify`);
+  // New API uses .php endpoint with query parameters
+  const url = new URL(`${API_BASE_URL}/validate_single.php`);
+  url.searchParams.append('apikey', apiKey);
   url.searchParams.append('email', email);
 
   const apiCallStartTime = Date.now();
-  let apiCallSuccess = false;
-  let apiCallError: string | undefined;
 
   try {
     const response = await fetch(url.toString(), {
@@ -196,10 +199,12 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
       );
     }
 
-    // Validate response with Zod schema (security: prevent blind type casts)
-    const rawData: unknown = await response.json();
-    const validatedData = validateEmailVerificationResponse(rawData);
+    // Validate and map response (security: prevent blind type casts)
+    const rawData = (await response.json()) as Record<string, unknown>;
     apiCallSuccess = true;
+
+    // Map the MyEmailVerifier raw response to our internal format
+    const validatedData = mapRawResponseToInternal(rawData);
 
     // Log the response (email is redacted inside logger)
     const responseData: Record<string, unknown> = { ...validatedData };
@@ -294,12 +299,17 @@ export async function fetchVerifierCredits(): Promise<number | null> {
 
     const data: unknown = await response.json();
 
-    // Validate response has Credits field
-    if (typeof data === 'object' && data !== null && 'Credits' in data) {
-      const credits = Number.parseInt((data as { Credits: string }).Credits, 10);
-      if (!Number.isNaN(credits)) {
-        await logger.info(`MyEmailVerifier credits fetched: ${credits}`);
-        return credits;
+    // Validate response has credits or Credits field (API returns lowercase, code expected uppercase)
+    if (typeof data === 'object' && data !== null) {
+      const rawData = data as Record<string, unknown>;
+      const creditsValue = rawData.credits ?? rawData.Credits;
+
+      if (creditsValue !== undefined && creditsValue !== null) {
+        const credits = Number.parseInt(String(creditsValue), 10);
+        if (!Number.isNaN(credits)) {
+          await logger.info(`MyEmailVerifier credits fetched: ${credits}`);
+          return credits;
+        }
       }
     }
 
@@ -359,6 +369,72 @@ async function syncCreditsAfterVerification(): Promise<void> {
         });
     }
   }
+}
+
+/**
+ * Maps MyEmailVerifier raw response to internal EmailVerificationResponse
+ *
+ * API Response Fields:
+ * - Address: string
+ * - Status: "Valid" | "Invalid" | "Unknown" | "Catch All" | "Grey-listed"
+ * - Disposable_Domain: "true" | "false"
+ * - Role_Based: "true" | "false"
+ * - Diagnosis: string
+ */
+export function mapRawResponseToInternal(data: Record<string, unknown>): EmailVerificationResponse {
+  const status = String(data.Status || 'Unknown');
+
+  // Handle boolean-like fields which can be string "true"/"false", "1"/"0", or numeric 1/0
+  const isTrue = (val: unknown): boolean => {
+    if (typeof val === 'boolean') {
+      return val;
+    }
+    const strVal = String(val).toLowerCase();
+    return strVal === 'true' || strVal === '1';
+  };
+
+  const isDisposable = isTrue(data.Disposable_Domain);
+  const isRole = isTrue(data.Role_Based);
+
+  let internalStatus: EmailVerificationResponse['status'] = 'unknown';
+  let risk: EmailVerificationResponse['risk'] = 'medium';
+
+  // Determine status
+  if (isDisposable) {
+    internalStatus = 'disposable';
+    risk = 'high';
+  } else if (isRole) {
+    internalStatus = 'role';
+    risk = 'low'; // Roles are valid emails, just often filtered
+  } else if (status === 'Valid') {
+    internalStatus = 'valid';
+    risk = 'low';
+  } else if (status === 'Invalid') {
+    internalStatus = 'invalid';
+    risk = 'high';
+  } else if (status === 'Catch All') {
+    internalStatus = 'catch-all';
+    risk = 'medium';
+  } else if (status === 'Unknown' || status === 'Grey-listed') {
+    internalStatus = 'unknown';
+    risk = 'medium';
+  }
+
+  const result: EmailVerificationResponse = {
+    status: internalStatus,
+    risk,
+  };
+
+  if (data.Address) {
+    result.email = String(data.Address);
+  }
+
+  if (data.Diagnosis) {
+    result.message = String(data.Diagnosis);
+  }
+
+  // Still run through Zod to ensure final internal format is correct
+  return validateEmailVerificationResponse(result);
 }
 
 /**

@@ -7,6 +7,7 @@
 export { ActivityFeed } from './ActivityFeed.js';
 export { AnalyticsDashboard } from './AnalyticsDashboard.js';
 export { AnalyticsPanel } from './AnalyticsPanel.js';
+export { AnalyticsView } from './AnalyticsView.js';
 export { CampaignBanner } from './CampaignBanner.js';
 export { CampaignForm } from './CampaignForm.js';
 export { CampaignStatus } from './CampaignStatus.js';

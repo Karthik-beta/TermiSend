@@ -10,6 +10,7 @@ import postgres from 'postgres';
 import { getEnv } from './config.js';
 import { logger } from './logger.js';
 import type {
+  AnalyticsEventRecord,
   AnalyticsEventType,
   AuditLog,
   Contact,
@@ -18,6 +19,7 @@ import type {
   JSONValue,
   LogStatus,
   MessageEvent,
+  PeriodicAnalytics,
   QuotaSnapshot,
   SendLog,
   SendMode,
@@ -443,11 +445,11 @@ export async function initializeSchema(): Promise<void> {
 
     // Always show success message when run from CLI (detected by checking if db.ts is the entry point)
     const dbConfig = getDbConfig();
-    console.log('✅ Database initialized successfully!');
-    console.log(`   Database: ${dbConfig.database}`);
-    console.log(
-      '   Tables: contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events'
-    );
+    await logger.info('Database initialized successfully', {
+      database: dbConfig.database,
+      tables:
+        'contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events',
+    });
   } catch (error) {
     throw new Error(
       `Failed to initialize database schema: ${error instanceof Error ? error.message : String(error)}`
@@ -521,20 +523,24 @@ export async function getEligibleContacts(limit: number = 1000): Promise<Contact
   return await sql<Contact[]>`
     SELECT c.* FROM contacts c
     WHERE NOT EXISTS (
-      SELECT 1 FROM analytics_events ae
-      WHERE ae.contact_id = c.id
-      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+      SELECT 1 FROM contact_suppressions cs
+      WHERE cs.contact_id = c.id
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
-      AND sl.status = 'sent'
+      AND sl.status IN ('sent', 'delivered')
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'failed'
       AND sl.retry_count >= 2
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM analytics_events ae
+      WHERE ae.contact_id = c.id
+      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
     )
     ORDER BY c.created_at ASC
     LIMIT ${limit}
@@ -552,20 +558,24 @@ export async function getEligibleContactCount(): Promise<number> {
   const [result] = await sql<{ count: string }[]>`
     SELECT COUNT(*) as count FROM contacts c
     WHERE NOT EXISTS (
-      SELECT 1 FROM analytics_events ae
-      WHERE ae.contact_id = c.id
-      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+      SELECT 1 FROM contact_suppressions cs
+      WHERE cs.contact_id = c.id
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
-      AND sl.status = 'sent'
+      AND sl.status IN ('sent', 'delivered')
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
       AND sl.status = 'failed'
       AND sl.retry_count >= 2
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM analytics_events ae
+      WHERE ae.contact_id = c.id
+      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
     )
   `;
   return Number.parseInt(result.count || '0', 10);
@@ -736,33 +746,437 @@ export async function getAnalyticsCounts(): Promise<{
   sent: number;
   failed: number;
   invalid: number;
+  bounced: number;
+  complained: number;
 }> {
-  const result = await sql<
-    {
-      total: number;
-      pending: number;
-      verified: number;
-      sent: number;
-      failed: number;
-      invalid: number;
-    }[]
-  >`
+  return await sql.begin(async (tx) => {
+    const transactionSql = tx as unknown as typeof sql;
+
+    const [totalResult] = await transactionSql<{ count: string }[]>`
+      SELECT COUNT(*) as count FROM contacts
+    `;
+
+    const [pendingResult] = await transactionSql<{ count: string }[]>`
+      SELECT COUNT(*) as count
+      FROM contacts c
+      WHERE NOT EXISTS (
+        SELECT 1 FROM contact_suppressions cs
+        WHERE cs.contact_id = c.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM send_logs sl
+        WHERE sl.contact_id = c.id
+        AND sl.status IN ('sent', 'delivered')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM send_logs sl
+        WHERE sl.contact_id = c.id
+        AND sl.status = 'failed'
+        AND sl.retry_count >= 2
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM analytics_events ae
+        WHERE ae.contact_id = c.id
+        AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+      )
+    `;
+
+    const [sendLogTotals] = await transactionSql<
+      {
+        sent: number | null;
+        failed: number | null;
+        bounced: number | null;
+        complained: number | null;
+      }[]
+    >`
+      SELECT
+        COALESCE(SUM(CASE WHEN status IN ('sent', 'delivered', 'bounced', 'complained') THEN 1 ELSE 0 END), 0) as sent,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed,
+        COALESCE(SUM(CASE WHEN status = 'bounced' THEN 1 ELSE 0 END), 0) as bounced,
+        COALESCE(SUM(CASE WHEN status = 'complained' THEN 1 ELSE 0 END), 0) as complained
+      FROM send_logs
+    `;
+
+    const [verificationTotals] = await transactionSql<
+      {
+        verified: number | null;
+        invalid: number | null;
+      }[]
+    >`
+      WITH ranked_verification_events AS (
+        SELECT
+          contact_id,
+          CASE
+            WHEN event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'valid' THEN 'verified'
+            WHEN event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
+            THEN 'invalid'
+            ELSE NULL
+          END as verification_state,
+          ROW_NUMBER() OVER (
+            PARTITION BY contact_id
+            ORDER BY
+              occurred_at DESC,
+              created_at DESC,
+              CASE
+                WHEN event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+                  OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
+                THEN 0
+                ELSE 1
+              END
+          ) as row_num
+        FROM analytics_events
+        WHERE contact_id IS NOT NULL
+        AND (
+          event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+          OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' IN ('valid', 'invalid'))
+        )
+      )
+      SELECT
+        COALESCE(SUM(CASE WHEN verification_state = 'verified' THEN 1 ELSE 0 END), 0) as verified,
+        COALESCE(SUM(CASE WHEN verification_state = 'invalid' THEN 1 ELSE 0 END), 0) as invalid
+      FROM ranked_verification_events
+      WHERE row_num = 1
+    `;
+
+    const sendLogRow = sendLogTotals ?? {
+      sent: 0,
+      failed: 0,
+      bounced: 0,
+      complained: 0,
+    };
+    const verificationRow = verificationTotals ?? {
+      verified: 0,
+      invalid: 0,
+    };
+
+    return {
+      total: Number(totalResult?.count ?? 0),
+      pending: Number(pendingResult?.count ?? 0),
+      verified: Number(verificationRow.verified ?? 0),
+      invalid: Number(verificationRow.invalid ?? 0),
+      sent: Number(sendLogRow.sent ?? 0),
+      failed: Number(sendLogRow.failed ?? 0),
+      bounced: Number(sendLogRow.bounced ?? 0),
+      complained: Number(sendLogRow.complained ?? 0),
+    };
+  });
+}
+
+/**
+ * Get recent analytics events for UI initialization
+ * Returns the latest events from the analytics_events table
+ */
+export async function getRecentAnalyticsEvents(
+  limit: number = 30
+): Promise<AnalyticsEventRecord[]> {
+  try {
+    const results = await sql<AnalyticsEventRecord[]>`
+      SELECT 
+        id,
+        event_type as "eventType",
+        event_id as "eventId",
+        correlation_id as "correlationId",
+        contact_id as "contactId",
+        send_log_id as "sendLogId",
+        campaign_id as "campaignId",
+        payload,
+        occurred_at as "occurredAt",
+        created_at as "createdAt"
+      FROM analytics_events
+      ORDER BY occurred_at DESC
+      LIMIT ${limit}
+    `;
+    return results;
+  } catch (_error) {
+    const error = _error as Error;
+    await logger.logError('Failed to fetch recent analytics events', error);
+    return [];
+  }
+}
+
+/**
+ * Get aggregated analytics for daily, weekly, and monthly periods
+ * Queries the analytics_events table directly
+ */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Straightforward SQL aggregations
+export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
+  const result = await sql<Record<string, string | number | null>[]>`
     SELECT 
-      COUNT(*) as total,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-      SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END) as verified,
-      SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-      SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) as invalid
-    FROM contacts
+      -- Daily
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_sent,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_delivered,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_opened,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_clicked,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_failed,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND payload->>'result' = 'valid'
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_verified,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND (
+              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
+              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+            )
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_invalid,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_bounced,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
+            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_complained,
+      -- Weekly
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_sent,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_delivered,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_opened,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_clicked,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_failed,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND payload->>'result' = 'valid'
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_verified,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND (
+              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
+              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+            )
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_invalid,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_bounced,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '7 days'
+            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_complained,
+      -- Monthly
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_sent,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_delivered,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_opened,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_clicked,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_failed,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND payload->>'result' = 'valid'
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_verified,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND (
+              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
+              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+            )
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_invalid,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_bounced,
+      SUM(
+        CASE
+          WHEN occurred_at >= NOW() - INTERVAL '30 days'
+            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_complained
+    FROM analytics_events
+    WHERE occurred_at >= NOW() - INTERVAL '30 days'
   `;
+
+  const row = result[0] || {};
+
   return {
-    total: Number(result[0]?.total ?? 0),
-    pending: Number(result[0]?.pending ?? 0),
-    verified: Number(result[0]?.verified ?? 0),
-    sent: Number(result[0]?.sent ?? 0),
-    failed: Number(result[0]?.failed ?? 0),
-    invalid: Number(result[0]?.invalid ?? 0),
+    daily: {
+      period: 'daily',
+      sent: Number(row.daily_sent || 0),
+      delivered: Number(row.daily_delivered || 0),
+      opened: Number(row.daily_opened || 0),
+      clicked: Number(row.daily_clicked || 0),
+      failed: Number(row.daily_failed || 0),
+      verified: Number(row.daily_verified || 0),
+      invalid: Number(row.daily_invalid || 0),
+      bounced: Number(row.daily_bounced || 0),
+      complained: Number(row.daily_complained || 0),
+    },
+    weekly: {
+      period: 'weekly',
+      sent: Number(row.weekly_sent || 0),
+      delivered: Number(row.weekly_delivered || 0),
+      opened: Number(row.weekly_opened || 0),
+      clicked: Number(row.weekly_clicked || 0),
+      failed: Number(row.weekly_failed || 0),
+      verified: Number(row.weekly_verified || 0),
+      invalid: Number(row.weekly_invalid || 0),
+      bounced: Number(row.weekly_bounced || 0),
+      complained: Number(row.weekly_complained || 0),
+    },
+    monthly: {
+      period: 'monthly',
+      sent: Number(row.monthly_sent || 0),
+      delivered: Number(row.monthly_delivered || 0),
+      opened: Number(row.monthly_opened || 0),
+      clicked: Number(row.monthly_clicked || 0),
+      failed: Number(row.monthly_failed || 0),
+      verified: Number(row.monthly_verified || 0),
+      invalid: Number(row.monthly_invalid || 0),
+      bounced: Number(row.monthly_bounced || 0),
+      complained: Number(row.monthly_complained || 0),
+    },
   };
 }
 
@@ -824,40 +1238,30 @@ export async function getAuditLogs(eventType?: string, limit: number = 100): Pro
  * When the database is empty, this will fetch from the API and store the result
  */
 export async function getEmailVerifierCredits(): Promise<EmailVerifierCredits | null> {
-  // First try to get from database
-  const [credits] = await sql<EmailVerifierCredits[]>`
-    SELECT * FROM email_verifier_credits
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-
-  if (credits) {
-    return credits;
-  }
-
-  // Database is empty - fetch from API and store the result
-  // Using dynamic import to avoid circular dependency with verifier.ts
+  // Try live API first so dashboard doesn't get stuck on stale persisted values.
+  // Using dynamic import to avoid circular dependency with verifier.ts.
   try {
     const { fetchVerifierCredits } = await import('./verifier.js');
     const apiCredits = await fetchVerifierCredits();
 
     if (apiCredits !== null) {
-      // Store in database for future calls
+      // Store in database for future calls and return fresh value.
       const result = await updateEmailVerifierCredits(apiCredits);
       return result;
     }
-
-    // API returned null (key missing or error) - store 0 credits to prevent repeated API calls
-    // Credits will be updated when a successful verification triggers syncCreditsAfterVerification()
-    const result = await updateEmailVerifierCredits(0);
-    return result;
   } catch (error) {
-    // Log but don't throw - we'll return null if API fetch fails
+    // Log but don't throw - we'll fall back to the latest persisted value.
     const errorMessage = error instanceof Error ? error.message : String(error);
     await logger.warn('Failed to fetch credits from API as fallback', { error: errorMessage });
   }
 
-  return null;
+  // Fallback to the latest persisted credits when live fetch is unavailable.
+  const [credits] = await sql<EmailVerifierCredits[]>`
+    SELECT * FROM email_verifier_credits
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `;
+  return credits ?? null;
 }
 
 /**
@@ -897,11 +1301,16 @@ function validateResetGuardrails(): {
   isAllowed: boolean;
   reason?: string;
 } {
+  // Check for force flag
+  const hasForceFlag = process.argv.includes('--force-production-reset');
+
   // Guardrail 1: Check NODE_ENV
-  if (isProduction()) {
+  if (isProduction() && !hasForceFlag) {
     return {
       isAllowed: false,
-      reason: 'Cannot reset database in production environment. NODE_ENV=production detected.',
+      reason:
+        'Cannot reset database in production environment. NODE_ENV=production detected.\n' +
+        'To bypass this safety check, use the --force-production-reset flag.',
     };
   }
 
@@ -920,10 +1329,12 @@ function validateResetGuardrails(): {
     dbName === 'production' ||
     dbName === 'prod' ||
     productionPatterns.some((pattern) => dbName.endsWith(pattern));
-  if (isProductionDbName) {
+  if (isProductionDbName && !hasForceFlag) {
     return {
       isAllowed: false,
-      reason: `Cannot reset database with name '${dbName}'. Detected production database name.`,
+      reason:
+        `Cannot reset database with name '${dbName}'. Detected production database name.\n` +
+        'To bypass this safety check, use the --force-production-reset flag.',
     };
   }
 
@@ -974,13 +1385,16 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
   // Guardrail 4: Log warning
   const env = getEnv();
   const dbName = process.env.DB_NAME || env.DB_NAME || 'termisend';
-  console.warn('⚠️  WARNING: Database reset will DELETE ALL DATA!');
-  console.warn(`⚠️  Database: ${dbName}`);
-  console.warn(`⚠️  Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.warn('⚠️  This action cannot be undone!\n');
+  await logger.warn('Database reset will DELETE ALL DATA!', {
+    database: dbName,
+    environment: process.env.NODE_ENV || 'development',
+  });
+  await logger.warn('Database reset confirmation received', {
+    environment: process.env.NODE_ENV || 'development',
+  });
 
   // Diagnostic logging to confirm execution is proceeding
-  console.log('→ Checking for existing tables...');
+  await logger.info('Checking for existing tables before reset');
 
   try {
     // List of all tables that should be reset
@@ -1002,7 +1416,7 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
     ];
 
     // Query which tables actually exist in the database
-    console.log('→ Querying information_schema for tables...');
+    await logger.info('Querying information_schema for existing tables');
 
     let existingTables: { tableName: string }[];
     try {
@@ -1012,7 +1426,7 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
         WHERE table_schema = 'public'
         AND table_name IN ${sql(expectedTables)}
       `;
-      console.log(`→ Found ${existingTables.length} tables in database`);
+      await logger.info('Existing tables discovered', { count: existingTables.length });
     } catch (queryError) {
       console.error(
         '→ SQL query failed:',
@@ -1029,14 +1443,14 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
 
     if (existingTableNames.length === 0) {
       // No tables exist yet - schema needs to be initialized
-      console.log('⚠️  No tables found - database may need schema initialization');
+      await logger.warn('No tables found - database may need schema initialization');
       return {
         success: true,
         message: `Database '${dbName}' has no tables to reset. Run initializeSchema() first if needed.`,
       };
     }
 
-    console.log(`→ Truncating ${existingTableNames.length} tables...`);
+    await logger.info('Truncating tables', { count: existingTableNames.length });
 
     // Execute truncate with CASCADE to handle any foreign key references
     // RESTART IDENTITY resets auto-increment sequences
@@ -1045,7 +1459,7 @@ export async function resetDatabase(): Promise<{ success: boolean; message: stri
     const quotedTables = existingTableNames.map((name) => `"${name}"`).join(', ');
     await sql.unsafe(`TRUNCATE TABLE ${quotedTables} RESTART IDENTITY CASCADE`);
 
-    console.log('✓ Database reset completed successfully');
+    await logger.info('Database reset completed successfully');
 
     return {
       success: true,

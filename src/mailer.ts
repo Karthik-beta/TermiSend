@@ -3,8 +3,6 @@
  * Handles spintax parsing, markdown rendering, and email template processing
  */
 
-// Node built-ins
-import crypto from 'node:crypto';
 import fs, { readFile } from 'node:fs/promises';
 
 // External libraries
@@ -639,6 +637,7 @@ async function handleUnsafeEmail(
       campaignId,
       reason: `Email verification failed: ${verificationResult.status} (${verificationResult.risk} risk)`,
       skipCategory: 'unsafe_email',
+      email: contact.email,
     });
     domainEvents.emit(event);
   } catch {
@@ -693,6 +692,7 @@ async function handleDryRun(
       messageId: 'dry_run',
       subject,
       mode: 'dry_run',
+      email: contact.email,
     });
     domainEvents.emit(event);
   } catch {
@@ -748,6 +748,7 @@ async function handleSuccessfulSend(
       messageId,
       subject,
       mode,
+      email: contact.email,
     });
     domainEvents.emit(event);
   } catch {
@@ -815,6 +816,7 @@ async function handleFailedSend(
       errorCategory: 'ses_error',
       retryAttempt,
       failureType,
+      email: contact.email,
     });
     domainEvents.emit(event);
   } catch {
@@ -881,6 +883,7 @@ async function handleContactError(
       retryAttempt,
       failureType: classification.type,
       stopCampaign: classification.stopCampaign,
+      email: contact.email,
     });
     domainEvents.emit(event);
   } catch {
@@ -1217,7 +1220,8 @@ export async function runCampaign(
     throw new Error(`Invalid template path: ${pathValidation.error}`);
   }
   const sanitizedTemplatePath = pathValidation.sanitizedPath;
-  const actualCampaignId = campaignId || crypto.randomUUID();
+  // Single-instance runner: campaign ID is optional and should remain null unless explicitly provided.
+  const actualCampaignId = campaignId;
 
   try {
     const templateContent = await readFile(sanitizedTemplatePath, 'utf-8');
@@ -1246,7 +1250,7 @@ export async function runCampaign(
 }
 
 async function executeCampaignLoop(
-  campaignId: string,
+  campaignId: string | undefined,
   templateContent: string,
   throttleController: EmailThrottleController,
   dryRun: boolean,
@@ -1301,7 +1305,11 @@ async function executeCampaignLoop(
   return result;
 }
 
-async function emitCampaignStarted(campaignId: string, mode: SendMode, templatePath: string) {
+async function emitCampaignStarted(
+  campaignId: string | undefined,
+  mode: SendMode,
+  templatePath: string
+) {
   const initialContacts = await getEligibleContacts();
   if (initialContacts.length > 0) {
     try {
@@ -1351,7 +1359,7 @@ async function processBatch(
   templateContent: string,
   throttleController: EmailThrottleController,
   dryRun: boolean,
-  campaignId: string,
+  campaignId: string | undefined,
   result: CampaignResult,
   onProgress?: ProgressCallback
 ) {
@@ -1407,7 +1415,7 @@ async function handleBatchError(
   contact: Contact,
   error: unknown,
   result: CampaignResult,
-  campaignId: string,
+  campaignId: string | undefined,
   mode: SendMode,
   templateContent: string,
   onProgress?: ProgressCallback
@@ -1426,7 +1434,11 @@ async function handleBatchError(
   });
 }
 
-function emitCampaignCompleted(campaignId: string, result: CampaignResult, durationMs: number) {
+function emitCampaignCompleted(
+  campaignId: string | undefined,
+  result: CampaignResult,
+  durationMs: number
+) {
   try {
     const event = createEvent<CampaignCompletedPayload>(DomainEventType.CAMPAIGN_COMPLETED, {
       campaignId,

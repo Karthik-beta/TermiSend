@@ -12,27 +12,12 @@
 
 import { sql } from '../db.js';
 import { logger } from '../logger.js';
+import type { AnalyticsEventRecord } from '../types.js';
 import type { DomainEvent, DomainEventPayload } from './types.js';
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
-
-/**
- * Analytics event record as stored in the database
- */
-export interface AnalyticsEventRecord {
-  id: string;
-  eventType: string;
-  eventId: string;
-  correlationId: string | null;
-  contactId: string | null;
-  sendLogId: string | null;
-  campaignId: string | null;
-  payload: DomainEventPayload;
-  occurredAt: Date;
-  createdAt: Date;
-}
 
 // ============================================================================
 // Event Persistence
