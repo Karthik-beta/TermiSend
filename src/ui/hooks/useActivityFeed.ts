@@ -1,245 +1,98 @@
 /**
  * useActivityFeed Hook
  *
- * Purpose: Manages live activity feed state for the dashboard.
- * Subscribes to the event bus for real-time analytics events
- * and provides an addEntry() function for manual additions.
- *
- * Keeps the last 30 events, auto-prunes older entries.
+ * Maintains a rolling list of activity events for the dashboard feed.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { getRecentAnalyticsEvents } from '../../db.js';
+import { useEffect, useState } from 'react';
 import { type AnalyticsEvent, eventBus } from '../../events/bus.js';
-import type { AnalyticsEventRecord } from '../../types.js';
-import { layout } from '../theme.js';
 import type { ActivityEvent, ActivitySource } from '../types.js';
-import {
-  type NormalizedAnalyticsEventType,
-  normalizeAnalyticsEventType,
-} from '../utils/analytics.js';
 
-interface UseActivityFeedReturn {
+const MAX_EVENTS = 200;
+
+export interface UseActivityFeedReturn {
   events: ActivityEvent[];
-  addEntry: (source: ActivitySource, message: string, status: ActivityEvent['status']) => void;
-  clear: () => void;
 }
 
-// Auto-incrementing ID counter
-let nextEventId = 1;
-
-/**
- * Hook for managing the live activity feed
- */
 export function useActivityFeed(): UseActivityFeedReturn {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
-  const eventsRef = useRef<ActivityEvent[]>([]);
 
-  const addEntry = useCallback(
-    (source: ActivitySource, message: string, status: ActivityEvent['status']) => {
-      const newEvent: ActivityEvent = {
-        id: nextEventId++,
-        source,
-        message,
-        status,
-        timestamp: new Date(),
-      };
-
-      eventsRef.current = [...eventsRef.current, newEvent].slice(-layout.maxFeedEntries);
-      setEvents(eventsRef.current);
-    },
-    []
-  );
-
-  const clear = useCallback(() => {
-    eventsRef.current = [];
-    setEvents([]);
-  }, []);
-
-  // Initial load from database
-  useEffect(() => {
-    let mounted = true;
-
-    async function initializeFeed() {
-      try {
-        const recentEvents = await getRecentAnalyticsEvents(layout.maxFeedEntries);
-        if (!mounted || recentEvents.length === 0) {
-          return;
-        }
-
-        // Map database records to activity events
-        // Reverse because DB sorts newest first (DESC), but feed appends/slices from end
-        const initialEvents: ActivityEvent[] = recentEvents
-          .reverse()
-          .map((event) => mapRecordToActivityEvent(event))
-          .filter((e): e is ActivityEvent => e !== null);
-
-        // Prepend hidden history or replace if empty
-        // In practice, since this runs on mount, eventsRef should be empty unless a real-time event
-        // arrived during the async call.
-        const merged = [...initialEvents, ...eventsRef.current].slice(-layout.maxFeedEntries);
-        eventsRef.current = merged;
-        setEvents(merged);
-      } catch (_error) {
-        // Silently ignore initialization errors
-      }
-    }
-
-    initializeFeed();
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  // Subscribe to event bus for analytics events
   useEffect(() => {
     const handleAnalyticsEvent = (event: AnalyticsEvent) => {
-      switch (event.type) {
-        case 'contact:imported':
-          addEntry('import', `Imported ${event.count} contact(s)`, 'info');
-          break;
-        case 'contact:verified':
-          addEntry(
-            'verifier',
-            `Contact #${event.id.slice(0, 8)} ${event.isValid ? 'verified valid' : 'marked invalid'}`,
-            event.isValid ? 'success' : 'warning'
-          );
-          break;
-        case 'email:sent':
-          addEntry('ses', `Email sent to ${event.email}`, 'success');
-          break;
-        case 'email:failed':
-          addEntry('ses', `Send failed for ${event.email}: ${event.error}`, 'error');
-          break;
-        case 'email:skipped':
-          addEntry('ses', `Skipped ${event.email}: ${event.reason}`, 'warning');
-          break;
-        case 'email:delivered':
-          addEntry('ses', `Email delivered (${event.messageId.slice(0, 12)}…)`, 'success');
-          break;
-        case 'email:bounced':
-          addEntry(
-            'ses',
-            `Bounce (${event.bounceType}) for ${event.messageId.slice(0, 12)}…`,
-            'error'
-          );
-          break;
-        case 'email:complained':
-          addEntry('ses', `Complaint for ${event.messageId.slice(0, 12)}…`, 'error');
-          break;
-        case 'contact:suppressed':
-          addEntry('system', `Contact suppressed: ${event.reason}`, 'warning');
-          break;
-        // contact:updated, email:opened, email:clicked — not shown in feed to reduce noise
+      const mapped = mapAnalyticsEventToActivity(event);
+      if (!mapped) {
+        return;
       }
+
+      setEvents((prev) => {
+        const next = [...prev, mapped];
+        if (next.length > MAX_EVENTS) {
+          return next.slice(-MAX_EVENTS);
+        }
+        return next;
+      });
     };
 
     eventBus.on('analytics', handleAnalyticsEvent);
     return () => {
       eventBus.off('analytics', handleAnalyticsEvent);
     };
-  }, [addEntry]);
+  }, []);
 
-  return { events, addEntry, clear };
+  return { events };
 }
 
-/**
- * Helper to map database records to ActivityEvent structure
- * Extracted to reduce cognitive complexity of the main hook
- */
-interface ActivityBuilderArgs {
-  event: AnalyticsEventRecord;
-  payload: Record<string, unknown>;
-  email: string;
+function mapAnalyticsEventToActivity(event: AnalyticsEvent): ActivityEvent | null {
+  const now = new Date();
+
+  switch (event.type) {
+    case 'contact:imported':
+      return createActivityEvent('import', `Imported ${event.count} contacts`, 'success', now);
+    case 'contact:verified':
+      return createActivityEvent(
+        'verifier',
+        event.isValid ? 'Contact verified' : 'Contact invalid/unsafe',
+        event.isValid ? 'success' : 'warning',
+        now
+      );
+    case 'email:sent':
+      return createActivityEvent('ses', `Sent to ${event.email}`, 'success', now);
+    case 'email:failed':
+      return createActivityEvent('ses', `Failed sending to ${event.email}`, 'error', now);
+    case 'email:skipped':
+      return createActivityEvent('system', `Skipped ${event.email} (${event.reason})`, 'warning', now);
+    case 'email:delivered':
+      return createActivityEvent('ses', 'Delivery confirmed', 'success', now);
+    case 'email:bounced':
+      return createActivityEvent('ses', `Bounce detected (${event.bounceType})`, 'warning', now);
+    case 'email:complained':
+      return createActivityEvent('ses', 'Complaint reported', 'error', now);
+    case 'email:opened':
+      return createActivityEvent('ses', 'Email opened', 'info', now);
+    case 'email:clicked':
+      return createActivityEvent('ses', 'Link clicked', 'info', now);
+    case 'contact:suppressed':
+      return createActivityEvent('system', `Contact suppressed (${event.reason})`, 'warning', now);
+    case 'contact:updated':
+      return createActivityEvent('system', `Contact status updated: ${event.status}`, 'info', now);
+    case 'verifier:credits_updated':
+      return createActivityEvent('verifier', `Verifier credits: ${event.credits}`, 'info', now);
+    default:
+      return null;
+  }
 }
 
-type ActivityBuilderResult = {
-  source: ActivitySource;
-  message: string;
-  status: ActivityEvent['status'];
-};
-
-const activityBuilders: Record<
-  NormalizedAnalyticsEventType,
-  (args: ActivityBuilderArgs) => ActivityBuilderResult
-> = {
-  'contact:imported': ({ payload }) => ({
-    source: 'import',
-    message: `Imported ${payload.count ?? 0} contact(s)`,
-    status: 'info',
-  }),
-  'contact:verified': ({ payload, event }) => {
-    const isValid =
-      payload.isValid === true || String(payload.result || '').toLowerCase() === 'valid';
-    const reason = payload.reason ? `: ${payload.reason}` : '';
-    return {
-      source: 'verifier',
-      message: `Contact #${String(event.contactId || '').slice(0, 8)} ${
-        isValid ? 'verified valid' : `marked invalid${reason}`
-      }`,
-      status: isValid ? 'success' : 'warning',
-    };
-  },
-  'contact:suppressed': ({ payload }) => ({
-    source: 'system',
-    message: `Contact suppressed: ${payload.reason || 'unknown'}`,
-    status: 'warning',
-  }),
-  'email:sent': ({ email }) => ({
-    source: 'ses',
-    message: `Email sent to ${email}`,
-    status: 'success',
-  }),
-  'email:failed': ({ email, payload }) => ({
-    source: 'ses',
-    message: `Send failed for ${email}: ${payload.error ?? payload.errorReason ?? 'unknown error'}`,
-    status: 'error',
-  }),
-  'email:skipped': ({ email, payload }) => ({
-    source: 'ses',
-    message: `Skipped ${email}: ${payload.reason ?? 'unspecified'}`,
-    status: 'warning',
-  }),
-  'email:delivered': ({ payload }) => ({
-    source: 'ses',
-    message: `Email delivered (${String(payload.messageId || '').slice(0, 12)}…)`,
-    status: 'success',
-  }),
-  'email:bounced': ({ payload }) => ({
-    source: 'ses',
-    message: `Bounce (${payload.bounceType || 'unknown'}) for ${String(
-      payload.messageId || ''
-    ).slice(0, 12)}…`,
-    status: 'error',
-  }),
-  'email:complained': ({ payload }) => ({
-    source: 'ses',
-    message: `Complaint for ${String(payload.messageId || '').slice(0, 12)}…`,
-    status: 'error',
-  }),
-};
-
-function mapRecordToActivityEvent(event: AnalyticsEventRecord): ActivityEvent | null {
-  const normalizedType = normalizeAnalyticsEventType(event.eventType);
-  if (!normalizedType) {
-    return null;
-  }
-
-  const builder = activityBuilders[normalizedType];
-  if (!builder) {
-    return null;
-  }
-
-  const payload = event.payload as unknown as Record<string, unknown>;
-  const email = String(payload.email || payload.recipientEmail || 'unknown');
-  const { source, message, status } = builder({ event, payload, email });
-
+function createActivityEvent(
+  source: ActivitySource,
+  message: string,
+  status: ActivityEvent['status'],
+  timestamp: Date
+): ActivityEvent {
   return {
-    id: nextEventId++,
+    id: timestamp.getTime() + Math.floor(Math.random() * 1000),
     source,
     message,
     status,
-    timestamp: new Date(event.occurredAt),
+    timestamp,
   };
 }

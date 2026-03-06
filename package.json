@@ -9,6 +9,7 @@
     "dev": "NODE_ENV=development bun run src/index.tsx",
     "prod": "NODE_ENV=production bun run src/index.tsx",
     "build": "bun build ./src/index.tsx --outdir ./dist --target=bun",
+    "shortcut:create": "bun run scripts/create-windows-shortcut.ts",
     "db:init": "bun run src/db.ts",
     "db:init:dev": "bun --env-file=.env.development run src/db.ts",
     "db:init:prod": "bun --env-file=.env.production run src/db.ts",
@@ -30,6 +31,7 @@
     "marked": "^17.0.3",
     "postgres": "3.4.8",
     "react": "^19.0.0",
+    "sharp": "0.34.3",
     "zod": "4.3.6"
   },
   "devDependencies": {

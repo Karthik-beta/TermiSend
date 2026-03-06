@@ -9,13 +9,14 @@ import {
   getSendLogByMessageId,
   incrementSendLogClicks,
   incrementSendLogOpens,
+  recordAnalyticsEvent,
   recordEngagementEvent,
   suppressContact,
   updateSendLogBounced,
   updateSendLogComplained,
 } from './db.js';
 import { emitAnalyticsEvent } from './events/bus.js';
-import { createEvent, DomainEventType, domainEvents } from './events/index.js';
+import { createEvent, DomainEventType } from './events/index.js';
 import { logger } from './logger.js';
 import type {
   EventProcessingResult,
@@ -33,6 +34,23 @@ import type {
 
 /** Maximum size for event data storage (100KB) */
 const MAX_EVENT_DATA_SIZE = 100000;
+
+async function persistAnalyticsEvent(event: {
+  type: string;
+  payload: object;
+  timestamp: Date;
+}): Promise<void> {
+  const payload = event.payload as Record<string, unknown>;
+
+  await recordAnalyticsEvent({
+    eventType: event.type,
+    payload,
+    contactId: typeof payload.contactId === 'string' ? payload.contactId : undefined,
+    sendLogId: typeof payload.sendLogId === 'string' ? payload.sendLogId : undefined,
+    campaignId: typeof payload.campaignId === 'string' ? payload.campaignId : undefined,
+    occurredAt: event.timestamp,
+  });
+}
 
 // ============================================================================
 // Main Event Router
@@ -52,7 +70,7 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
     .catch((e) => console.error('Log failed:', e));
 
   // Emit event received notification
-  domainEvents.emit(
+  await persistAnalyticsEvent(
     createEvent(DomainEventType.SES_EVENT_RECEIVED, {
       eventId: event.eventId,
       eventType: event.eventType,
@@ -220,7 +238,7 @@ export async function handleBounceEvent(
       suppressed = true;
 
       // Emit contact suppressed event
-      domainEvents.emit(
+      await persistAnalyticsEvent(
         createEvent(DomainEventType.CONTACT_SUPPRESSED, {
           contactId: sendLog.contactId,
           messageId: event.messageId,
@@ -238,7 +256,7 @@ export async function handleBounceEvent(
     }
 
     // Emit bounce processed event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.SES_BOUNCE_PROCESSED, {
         eventId: event.eventId,
         messageId: event.messageId,
@@ -319,7 +337,7 @@ export async function handleComplaintEvent(
     affectedContactIds.push(sendLog.contactId);
 
     // Emit contact suppressed event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.CONTACT_SUPPRESSED, {
         contactId: sendLog.contactId,
         messageId: event.messageId,
@@ -329,7 +347,7 @@ export async function handleComplaintEvent(
     );
 
     // Emit complaint processed event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.SES_COMPLAINT_PROCESSED, {
         eventId: event.eventId,
         messageId: event.messageId,
@@ -407,7 +425,7 @@ export async function handleDeliveryEvent(
     await confirmSendLogDelivery(sendLog.id, new Date(event.data.timestamp));
 
     // Emit delivery confirmed event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.SES_DELIVERY_CONFIRMED, {
         eventId: event.eventId,
         messageId: event.messageId,
@@ -487,7 +505,7 @@ export async function handleOpenEvent(
     });
 
     // Emit open recorded event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.SES_OPEN_RECORDED, {
         eventId: event.eventId,
         messageId: event.messageId,
@@ -571,7 +589,7 @@ export async function handleClickEvent(
     });
 
     // Emit click recorded event
-    domainEvents.emit(
+    await persistAnalyticsEvent(
       createEvent(DomainEventType.SES_CLICK_RECORDED, {
         eventId: event.eventId,
         messageId: event.messageId,

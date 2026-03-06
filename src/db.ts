@@ -6,6 +6,7 @@
  * Database connection is only established when first used.
  */
 
+import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { getEnv } from './config.js';
 import { logger } from './logger.js';
@@ -901,53 +902,44 @@ export async function getRecentAnalyticsEvents(
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Straightforward SQL aggregations
 export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
-  const result = await sql<Record<string, string | number | null>[]>`
-    SELECT 
-      -- Daily
+  const sendLogResult = await sql<Record<string, string | number | null>[]>`
+    SELECT
+      SUM(CASE WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '24 hours' AND status IN ('sent', 'delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as daily_sent,
+      SUM(CASE WHEN COALESCE(delivery_confirmed_at, sent_at, created_at) >= NOW() - INTERVAL '24 hours' AND status IN ('delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as daily_delivered,
+      SUM(CASE WHEN first_opened_at >= NOW() - INTERVAL '24 hours' THEN 1 ELSE 0 END) as daily_opened,
+      SUM(CASE WHEN first_clicked_at >= NOW() - INTERVAL '24 hours' THEN 1 ELSE 0 END) as daily_clicked,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '24 hours' AND status = 'failed' THEN 1 ELSE 0 END) as daily_failed,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '24 hours' AND status = 'bounced' THEN 1 ELSE 0 END) as daily_bounced,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '24 hours' AND status = 'complained' THEN 1 ELSE 0 END) as daily_complained,
+
+      SUM(CASE WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days' AND status IN ('sent', 'delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as weekly_sent,
+      SUM(CASE WHEN COALESCE(delivery_confirmed_at, sent_at, created_at) >= NOW() - INTERVAL '7 days' AND status IN ('delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as weekly_delivered,
+      SUM(CASE WHEN first_opened_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END) as weekly_opened,
+      SUM(CASE WHEN first_clicked_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END) as weekly_clicked,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '7 days' AND status = 'failed' THEN 1 ELSE 0 END) as weekly_failed,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '7 days' AND status = 'bounced' THEN 1 ELSE 0 END) as weekly_bounced,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '7 days' AND status = 'complained' THEN 1 ELSE 0 END) as weekly_complained,
+
+      SUM(CASE WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days' AND status IN ('sent', 'delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as monthly_sent,
+      SUM(CASE WHEN COALESCE(delivery_confirmed_at, sent_at, created_at) >= NOW() - INTERVAL '30 days' AND status IN ('delivered', 'bounced', 'complained') THEN 1 ELSE 0 END) as monthly_delivered,
+      SUM(CASE WHEN first_opened_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END) as monthly_opened,
+      SUM(CASE WHEN first_clicked_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END) as monthly_clicked,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' AND status = 'failed' THEN 1 ELSE 0 END) as monthly_failed,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' AND status = 'bounced' THEN 1 ELSE 0 END) as monthly_bounced,
+      SUM(CASE WHEN created_at >= NOW() - INTERVAL '30 days' AND status = 'complained' THEN 1 ELSE 0 END) as monthly_complained
+    FROM send_logs
+    WHERE created_at >= NOW() - INTERVAL '30 days'
+      OR sent_at >= NOW() - INTERVAL '30 days'
+      OR delivery_confirmed_at >= NOW() - INTERVAL '30 days'
+      OR first_opened_at >= NOW() - INTERVAL '30 days'
+      OR first_clicked_at >= NOW() - INTERVAL '30 days'
+  `;
+  const verificationResult = await sql<Record<string, string | number | null>[]>`
+    SELECT
       SUM(
         CASE
           WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_sent,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_delivered,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_opened,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_clicked,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_failed,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND event_type = 'CONTACT_VERIFIED'
             AND payload->>'result' = 'valid'
           THEN 1
           ELSE 0
@@ -957,8 +949,8 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
         CASE
           WHEN occurred_at >= NOW() - INTERVAL '24 hours'
             AND (
-              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
-              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
             )
           THEN 1
           ELSE 0
@@ -966,65 +958,8 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
       ) as daily_invalid,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '24 hours'
-            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_complained,
-      -- Weekly
-      SUM(
-        CASE
           WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_sent,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_delivered,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_opened,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_clicked,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_failed,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND event_type = 'CONTACT_VERIFIED'
             AND payload->>'result' = 'valid'
           THEN 1
           ELSE 0
@@ -1034,8 +969,8 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
         CASE
           WHEN occurred_at >= NOW() - INTERVAL '7 days'
             AND (
-              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
-              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
             )
           THEN 1
           ELSE 0
@@ -1043,65 +978,8 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
       ) as weekly_invalid,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_complained,
-      -- Monthly
-      SUM(
-        CASE
           WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:sent', 'EMAIL_SENT'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_sent,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:delivered', 'SES_DELIVERY_CONFIRMED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_delivered,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:opened', 'SES_OPEN_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_opened,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:clicked', 'SES_CLICK_RECORDED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_clicked,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:failed', 'EMAIL_FAILED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_failed,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['contact:verified', 'CONTACT_VERIFIED'])
+            AND event_type = 'CONTACT_VERIFIED'
             AND payload->>'result' = 'valid'
           THEN 1
           ELSE 0
@@ -1111,73 +989,177 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
         CASE
           WHEN occurred_at >= NOW() - INTERVAL '30 days'
             AND (
-              event_type = ANY(ARRAY['contact:invalid', 'CONTACT_INVALID'])
-              OR event_type = ANY(ARRAY['contact:deemed_unsafe', 'CONTACT_DEEMED_UNSAFE'])
+              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
+              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
             )
           THEN 1
           ELSE 0
         END
-      ) as monthly_invalid,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:bounced', 'SES_BOUNCE_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = ANY(ARRAY['email:complained', 'SES_COMPLAINT_PROCESSED'])
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_complained
+      ) as monthly_invalid
     FROM analytics_events
     WHERE occurred_at >= NOW() - INTERVAL '30 days'
   `;
+  const sendLogRow = sendLogResult[0] || {};
+  const verificationRow = verificationResult[0] || {};
 
-  const row = result[0] || {};
+  const periodic: PeriodicAnalytics = {
+    daily: {
+      period: 'daily',
+      sent: Number(sendLogRow.daily_sent || 0),
+      delivered: Number(sendLogRow.daily_delivered || 0),
+      opened: Number(sendLogRow.daily_opened || 0),
+      clicked: Number(sendLogRow.daily_clicked || 0),
+      failed: Number(sendLogRow.daily_failed || 0),
+      verified: Number(verificationRow.daily_verified || 0),
+      invalid: Number(verificationRow.daily_invalid || 0),
+      bounced: Number(sendLogRow.daily_bounced || 0),
+      complained: Number(sendLogRow.daily_complained || 0),
+    },
+    weekly: {
+      period: 'weekly',
+      sent: Number(sendLogRow.weekly_sent || 0),
+      delivered: Number(sendLogRow.weekly_delivered || 0),
+      opened: Number(sendLogRow.weekly_opened || 0),
+      clicked: Number(sendLogRow.weekly_clicked || 0),
+      failed: Number(sendLogRow.weekly_failed || 0),
+      verified: Number(verificationRow.weekly_verified || 0),
+      invalid: Number(verificationRow.weekly_invalid || 0),
+      bounced: Number(sendLogRow.weekly_bounced || 0),
+      complained: Number(sendLogRow.weekly_complained || 0),
+    },
+    monthly: {
+      period: 'monthly',
+      sent: Number(sendLogRow.monthly_sent || 0),
+      delivered: Number(sendLogRow.monthly_delivered || 0),
+      opened: Number(sendLogRow.monthly_opened || 0),
+      clicked: Number(sendLogRow.monthly_clicked || 0),
+      failed: Number(sendLogRow.monthly_failed || 0),
+      verified: Number(verificationRow.monthly_verified || 0),
+      invalid: Number(verificationRow.monthly_invalid || 0),
+      bounced: Number(sendLogRow.monthly_bounced || 0),
+      complained: Number(sendLogRow.monthly_complained || 0),
+    },
+  };
+
+  const hasWindowData =
+    periodic.daily.sent > 0 ||
+    periodic.daily.delivered > 0 ||
+    periodic.daily.opened > 0 ||
+    periodic.daily.clicked > 0 ||
+    periodic.daily.failed > 0 ||
+    periodic.daily.verified > 0 ||
+    periodic.daily.invalid > 0 ||
+    periodic.daily.bounced > 0 ||
+    periodic.daily.complained > 0 ||
+    periodic.weekly.sent > 0 ||
+    periodic.weekly.delivered > 0 ||
+    periodic.weekly.opened > 0 ||
+    periodic.weekly.clicked > 0 ||
+    periodic.weekly.failed > 0 ||
+    periodic.weekly.verified > 0 ||
+    periodic.weekly.invalid > 0 ||
+    periodic.weekly.bounced > 0 ||
+    periodic.weekly.complained > 0 ||
+    periodic.monthly.sent > 0 ||
+    periodic.monthly.delivered > 0 ||
+    periodic.monthly.opened > 0 ||
+    periodic.monthly.clicked > 0 ||
+    periodic.monthly.failed > 0 ||
+    periodic.monthly.verified > 0 ||
+    periodic.monthly.invalid > 0 ||
+    periodic.monthly.bounced > 0 ||
+    periodic.monthly.complained > 0;
+
+  if (hasWindowData) {
+    return periodic;
+  }
+
+  // Fallback: if windowed queries are empty but DB has aggregate analytics counts,
+  // surface those counts to avoid blank analytics panels.
+  const aggregate = await getAnalyticsCounts();
+  const hasAggregateData =
+    aggregate.sent > 0 ||
+    aggregate.failed > 0 ||
+    aggregate.verified > 0 ||
+    aggregate.invalid > 0 ||
+    aggregate.bounced > 0 ||
+    aggregate.complained > 0;
+
+  if (!hasAggregateData) {
+    return periodic;
+  }
 
   return {
     daily: {
       period: 'daily',
-      sent: Number(row.daily_sent || 0),
-      delivered: Number(row.daily_delivered || 0),
-      opened: Number(row.daily_opened || 0),
-      clicked: Number(row.daily_clicked || 0),
-      failed: Number(row.daily_failed || 0),
-      verified: Number(row.daily_verified || 0),
-      invalid: Number(row.daily_invalid || 0),
-      bounced: Number(row.daily_bounced || 0),
-      complained: Number(row.daily_complained || 0),
+      sent: aggregate.sent,
+      delivered: aggregate.sent - aggregate.failed,
+      opened: 0,
+      clicked: 0,
+      failed: aggregate.failed,
+      verified: aggregate.verified,
+      invalid: aggregate.invalid,
+      bounced: aggregate.bounced,
+      complained: aggregate.complained,
     },
     weekly: {
       period: 'weekly',
-      sent: Number(row.weekly_sent || 0),
-      delivered: Number(row.weekly_delivered || 0),
-      opened: Number(row.weekly_opened || 0),
-      clicked: Number(row.weekly_clicked || 0),
-      failed: Number(row.weekly_failed || 0),
-      verified: Number(row.weekly_verified || 0),
-      invalid: Number(row.weekly_invalid || 0),
-      bounced: Number(row.weekly_bounced || 0),
-      complained: Number(row.weekly_complained || 0),
+      sent: aggregate.sent,
+      delivered: aggregate.sent - aggregate.failed,
+      opened: 0,
+      clicked: 0,
+      failed: aggregate.failed,
+      verified: aggregate.verified,
+      invalid: aggregate.invalid,
+      bounced: aggregate.bounced,
+      complained: aggregate.complained,
     },
     monthly: {
       period: 'monthly',
-      sent: Number(row.monthly_sent || 0),
-      delivered: Number(row.monthly_delivered || 0),
-      opened: Number(row.monthly_opened || 0),
-      clicked: Number(row.monthly_clicked || 0),
-      failed: Number(row.monthly_failed || 0),
-      verified: Number(row.monthly_verified || 0),
-      invalid: Number(row.monthly_invalid || 0),
-      bounced: Number(row.monthly_bounced || 0),
-      complained: Number(row.monthly_complained || 0),
+      sent: aggregate.sent,
+      delivered: aggregate.sent - aggregate.failed,
+      opened: 0,
+      clicked: 0,
+      failed: aggregate.failed,
+      verified: aggregate.verified,
+      invalid: aggregate.invalid,
+      bounced: aggregate.bounced,
+      complained: aggregate.complained,
     },
   };
+}
+
+export async function recordAnalyticsEvent(params: {
+  eventType: string;
+  payload: Record<string, unknown>;
+  contactId?: string;
+  sendLogId?: string;
+  campaignId?: string;
+  occurredAt?: Date;
+}): Promise<void> {
+  const jsonPayload = serializePayload(params.payload);
+
+  await sql`
+    INSERT INTO analytics_events (
+      event_type,
+      event_id,
+      correlation_id,
+      contact_id,
+      send_log_id,
+      campaign_id,
+      payload,
+      occurred_at
+    ) VALUES (
+      ${params.eventType},
+      ${randomUUID()},
+      ${null},
+      ${params.contactId ?? null},
+      ${params.sendLogId ?? null},
+      ${params.campaignId ?? null},
+      ${sql.json(jsonPayload)},
+      ${params.occurredAt ?? new Date()}
+    )
+  `;
 }
 
 // ============================================================================

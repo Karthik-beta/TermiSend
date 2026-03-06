@@ -98,6 +98,30 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
    bun run db:init
    ```
 
+## Desktop Shortcut (Windows)
+
+Use the bundled production build to make TermiSend available via a desktop icon:
+
+1. Build the production bundle if you have not already:
+   ```bash
+   bun build
+   ```
+2. Run the shortcut helper from the repo root:
+   ```bash
+   bun run shortcut:create
+   ```
+
+The helper enforces a Windows-only session, validates that `dist/index.js` exists, and creates a `.lnk` on your desktop that launches Command Prompt (`cmd.exe /k`) before invoking `bun run` so the console window stays open for visibility until you close TermiSend manually. It also applies the TermiSend icon (`assets/termisend.ico`) when present and wires a `Ctrl+Alt+T` hotkey.
+
+Customise the shortcut with the following flags:
+
+- `--name <label>`: override the shortcut label that appears in Explorer (the script appends `.lnk` if you omit it).
+- `--desktop-path <path>`: point the script at a different directory (useful for shared desktops or nonstandard profiles).
+- `--icon <path>`: supply your own `.ico` file instead of the default.
+- `--force`: replace an existing shortcut without prompting.
+
+Re-run the helper whenever you move the repo, rebuild the bundle, or redeploy TermiSend so the shortcut continues to point at the correct `dist/index.js`.
+
 ## Environment Setup
 
 ### Required Configuration

@@ -12,7 +12,7 @@
 
 import { sql } from '../db.js';
 import { logger } from '../logger.js';
-import type { AnalyticsEventRecord } from '../types.js';
+import type { AnalyticsEventRecord, JSONValue } from '../types.js';
 import type { DomainEvent, DomainEventPayload } from './types.js';
 
 // ============================================================================
@@ -36,6 +36,7 @@ export async function saveEvent(event: DomainEvent): Promise<void> {
     const contactId = extractContactId(event.payload);
     const sendLogId = extractSendLogId(event.payload);
     const campaignId = extractCampaignId(event.payload);
+    const jsonPayload = serializePayload(event.payload as unknown as Record<string, unknown>);
 
     await sql`
       INSERT INTO analytics_events (
@@ -54,7 +55,7 @@ export async function saveEvent(event: DomainEvent): Promise<void> {
         ${contactId || null},
         ${sendLogId || null},
         ${campaignId || null},
-        ${JSON.stringify(event.payload)},
+        ${sql.json(jsonPayload)},
         ${event.timestamp}
       )
     `;
@@ -70,6 +71,13 @@ export async function saveEvent(event: DomainEvent): Promise<void> {
       }
     );
   }
+}
+
+/**
+ * Serialize payload to JSON-compatible format
+ */
+function serializePayload(payload: Record<string, unknown>): JSONValue {
+  return JSON.parse(JSON.stringify(payload)) as JSONValue;
 }
 
 /**

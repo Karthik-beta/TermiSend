@@ -13,6 +13,7 @@ import { getPeriodicAnalytics } from '../../db.js';
 import { type AnalyticsEvent, eventBus } from '../../events/bus.js';
 import type { PeriodicAnalytics } from '../../types.js';
 import { colors } from '../theme.js';
+import { generateAnalyticsCardJpeg, warmAnalyticsCardRenderer } from '../utils/analytics-card.js';
 import { Panel } from './Panel.js';
 
 export function AnalyticsView(): React.ReactElement {
@@ -22,7 +23,10 @@ export function AnalyticsView(): React.ReactElement {
 
   useEffect(() => {
     let mounted = true;
-    async function fetch() {
+
+    void warmAnalyticsCardRenderer();
+
+    async function refreshData() {
       try {
         const result = await getPeriodicAnalytics();
         if (mounted) {
@@ -35,69 +39,27 @@ export function AnalyticsView(): React.ReactElement {
         }
       }
     }
-    fetch();
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
-  // Subscribe to real-time events to increment stats
-  useEffect(() => {
+    refreshData();
+
     const handleEvent = (event: AnalyticsEvent) => {
-      setData((prev) => {
-        if (!prev) {
-          return prev;
-        }
-        const next = {
-          daily: { ...prev.daily },
-          weekly: { ...prev.weekly },
-          monthly: { ...prev.monthly },
-        };
-
-        const increment = (field: keyof typeof next.daily) => {
-          if (typeof next.daily[field] === 'number') {
-            (next.daily[field] as number) += 1;
-            (next.weekly[field] as number) += 1;
-            (next.monthly[field] as number) += 1;
-          }
-        };
-
-        switch (event.type) {
-          case 'email:sent':
-            increment('sent');
-            break;
-          case 'email:delivered':
-            increment('delivered');
-            break;
-          case 'email:opened':
-            increment('opened');
-            break;
-          case 'email:clicked':
-            increment('clicked');
-            break;
-          case 'email:failed':
-            increment('failed');
-            break;
-          case 'contact:verified':
-            if (event.isValid) {
-              increment('verified');
-            } else {
-              increment('invalid');
-            }
-            break;
-          case 'email:bounced':
-            increment('bounced');
-            break;
-          case 'email:complained':
-            increment('complained');
-            break;
-        }
-        return next;
-      });
+      switch (event.type) {
+        case 'email:sent':
+        case 'email:delivered':
+        case 'email:opened':
+        case 'email:clicked':
+        case 'email:failed':
+        case 'email:bounced':
+        case 'email:complained':
+        case 'contact:verified':
+          void refreshData();
+          break;
+      }
     };
 
     eventBus.on('analytics', handleEvent);
     return () => {
+      mounted = false;
       eventBus.off('analytics', handleEvent);
     };
   }, []);
@@ -105,54 +67,8 @@ export function AnalyticsView(): React.ReactElement {
   // This useInput is for copying data to clipboard
   useInput((input, _key) => {
     if (input.toLowerCase() === 'c' && data) {
-      let table = 'TermiSend Analytics Snapshot\n';
-      table += '----------------------------------------------------------\n';
-      table += `${'Metric'.padEnd(15)}${'Last 24h'.padEnd(12)}${'Last 7d'.padEnd(12)}Last 30d\n`;
-      table += '----------------------------------------------------------\n';
-      const rows = [
-        ['Sent', 'sent'],
-        ['Delivered', 'delivered'],
-        ['Opened', 'opened'],
-        ['Clicked', 'clicked'],
-        ['Failed', 'failed'],
-        ['Verified', 'verified'],
-        ['Invalid', 'invalid'],
-        ['Bounced', 'bounced'],
-        ['Complained', 'complained'],
-      ] as const;
-
-      for (const [label, field] of rows) {
-        table += `${label.padEnd(15)}${String(data.daily[field]).padEnd(12)}${String(data.weekly[field]).padEnd(12)}${String(data.monthly[field])}\n`;
-      }
-
-      table += '\nRates\n';
-      table += '----------------------------------------------------------\n';
-
-      const rateRows = [
-        ['Delivery Rate', 'delivered', 'sent'],
-        ['Open Rate', 'opened', 'delivered'],
-        ['Click Rate', 'clicked', 'opened'],
-      ] as const;
-
-      for (const [label, num, denom] of rateRows) {
-        table += `${label.padEnd(15)}${calculateRate(Number(data.daily[num]), Number(data.daily[denom])).padEnd(12)}${calculateRate(Number(data.weekly[num]), Number(data.weekly[denom])).padEnd(12)}${calculateRate(Number(data.monthly[num]), Number(data.monthly[denom]))}\n`;
-      }
-
-      table += '----------------------------------------------------------\n';
-
-      const proc = exec('clip', (error) => {
-        if (error) {
-          setCopyStatus('Failed to copy');
-        } else {
-          setCopyStatus('Copied to clipboard!');
-        }
-        setTimeout(() => setCopyStatus(null), 3000);
-      });
-
-      if (proc.stdin) {
-        proc.stdin.write(table);
-        proc.stdin.end();
-      }
+      setCopyStatus('Rendering share card...');
+      void copyAnalyticsCardToClipboard(data, setCopyStatus);
     }
   });
 
@@ -275,11 +191,40 @@ export function AnalyticsView(): React.ReactElement {
         <Box flexDirection="row">
           <Text dimColor={true}>Press </Text>
           <Text color={colors.primary}>[C]</Text>
-          <Text dimColor={true}> to copy to clipboard | Press </Text>
+          <Text dimColor={true}> to copy shareable image | Press </Text>
           <Text color={colors.primary}>[Esc]</Text>
           <Text dimColor={true}> to go back.</Text>
         </Box>
       </Box>
     </Panel>
   );
+}
+
+async function copyAnalyticsCardToClipboard(
+  data: PeriodicAnalytics,
+  setCopyStatus: (value: string | null) => void
+): Promise<void> {
+  try {
+    const imagePath = await generateAnalyticsCardJpeg(data);
+    const escapedPath = imagePath.replaceAll("'", "''");
+    const command =
+      `powershell.exe -NoProfile -STA -Command "` +
+      `Add-Type -AssemblyName System.Windows.Forms; ` +
+      `Add-Type -AssemblyName System.Drawing; ` +
+      `$img = [System.Drawing.Image]::FromFile('${escapedPath}'); ` +
+      `[System.Windows.Forms.Clipboard]::SetImage($img); ` +
+      `$img.Dispose()"`;
+
+    exec(command, (error) => {
+      if (error) {
+        setCopyStatus('Failed to copy image');
+      } else {
+        setCopyStatus('Shareable image copied!');
+      }
+      setTimeout(() => setCopyStatus(null), 3000);
+    });
+  } catch {
+    setCopyStatus('Failed to render image');
+    setTimeout(() => setCopyStatus(null), 3000);
+  }
 }

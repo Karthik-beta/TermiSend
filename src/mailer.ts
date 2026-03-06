@@ -14,6 +14,7 @@ import {
   getEligibleContactCount,
   getEligibleContacts,
   incrementRetryCount,
+  recordAnalyticsEvent,
   updateSendLog,
 } from './db.js';
 import { emitAnalyticsEvent } from './events/bus.js';
@@ -25,7 +26,6 @@ import {
   type ContactVerifiedPayload,
   createEvent,
   DomainEventType,
-  domainEvents,
   type EmailFailedPayload,
   type EmailSendRequestedPayload,
   type EmailSentPayload,
@@ -67,6 +67,23 @@ export const __test = {
   validateCriticalConfig: validateCriticalConfig,
   validateTemplateFiles: validateTemplateFiles,
 };
+
+async function persistAnalyticsEvent(event: {
+  type: string;
+  payload: object;
+  timestamp: Date;
+}): Promise<void> {
+  const payload = event.payload as Record<string, unknown>;
+
+  await recordAnalyticsEvent({
+    eventType: event.type,
+    payload,
+    contactId: typeof payload.contactId === 'string' ? payload.contactId : undefined,
+    sendLogId: typeof payload.sendLogId === 'string' ? payload.sendLogId : undefined,
+    campaignId: typeof payload.campaignId === 'string' ? payload.campaignId : undefined,
+    occurredAt: event.timestamp,
+  });
+}
 
 // ============================================================================
 // Error Classification and Campaign Control
@@ -523,7 +540,7 @@ async function verifyContactEmail(
           email: contact.email,
           reason: verificationResult.message || 'Email status: invalid',
         });
-        domainEvents.emit(event);
+        await persistAnalyticsEvent(event);
       } catch {
         /* ignore */
       }
@@ -544,7 +561,7 @@ async function verifyContactEmail(
           email: contact.email,
           result: 'valid',
         });
-        domainEvents.emit(event);
+        await persistAnalyticsEvent(event);
       } catch {
         /* ignore */
       }
@@ -568,7 +585,7 @@ async function verifyContactEmail(
             reason: `Unsafe email: ${verificationResult.status} (${verificationResult.risk} risk)`,
           }
         );
-        domainEvents.emit(event);
+        await persistAnalyticsEvent(event);
       } catch {
         /* ignore */
       }
@@ -639,7 +656,7 @@ async function handleUnsafeEmail(
       skipCategory: 'unsafe_email',
       email: contact.email,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -694,7 +711,7 @@ async function handleDryRun(
       mode: 'dry_run',
       email: contact.email,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -750,7 +767,7 @@ async function handleSuccessfulSend(
       mode,
       email: contact.email,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -818,7 +835,7 @@ async function handleFailedSend(
       failureType,
       email: contact.email,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -885,7 +902,7 @@ async function handleContactError(
       stopCampaign: classification.stopCampaign,
       email: contact.email,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -1021,7 +1038,7 @@ async function processContact(
       subject,
       mode,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     // Silently ignore event emission errors
   }
@@ -1301,7 +1318,7 @@ async function executeCampaignLoop(
     }
   }
 
-  emitCampaignCompleted(campaignId, result, Date.now() - campaignStartTime);
+  await emitCampaignCompleted(campaignId, result, Date.now() - campaignStartTime);
   return result;
 }
 
@@ -1319,7 +1336,7 @@ async function emitCampaignStarted(
         mode,
         templatePath,
       });
-      domainEvents.emit(event);
+      await persistAnalyticsEvent(event);
     } catch {
       /* ignore */
     }
@@ -1434,11 +1451,11 @@ async function handleBatchError(
   });
 }
 
-function emitCampaignCompleted(
+async function emitCampaignCompleted(
   campaignId: string | undefined,
   result: CampaignResult,
   durationMs: number
-) {
+): Promise<void> {
   try {
     const event = createEvent<CampaignCompletedPayload>(DomainEventType.CAMPAIGN_COMPLETED, {
       campaignId,
@@ -1448,7 +1465,7 @@ function emitCampaignCompleted(
       skippedCount: result.skippedCount,
       durationMs,
     });
-    domainEvents.emit(event);
+    await persistAnalyticsEvent(event);
   } catch {
     /* ignore */
   }
