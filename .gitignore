@@ -25,6 +25,7 @@ npm-debug.log*
 # Database
 dump.rdb
 *.db
+backups/
 
 # OS files
 .DS_Store

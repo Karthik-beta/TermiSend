@@ -16,6 +16,10 @@
     "db:reset": "bun run src/db.ts reset",
     "db:reset:dev": "bun --env-file=.env.development run src/db.ts reset --confirm-reset",
     "db:reset:prod": "bun --env-file=.env.production run src/db.ts reset --confirm-reset --force-production-reset",
+    "db:backup": "bun run scripts/backup-db.ts",
+    "db:backup:prod": "bun run scripts/backup-db.ts --env production",
+    "db:restore": "bun run scripts/restore-db.ts",
+    "db:restore:prod": "bun run scripts/restore-db.ts --env production",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write ."

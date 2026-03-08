@@ -35,8 +35,40 @@ A local-only, terminal-based email outreach tool built with Bun, TypeScript, and
    bun run scripts/verify-ses.ts
    bun run scripts/verify-myemailverifier.ts
    ```
-5. **Initialize Database**: `bun run db:init`
+5. **Initialize Database**: `bun run db:init:dev` (or `db:init:prod` for production)
 6. **Start**: `bun run dev`
+
+## Database Backup and Restore
+
+TermiSend includes PostgreSQL-native backup and restore commands for full database snapshots.
+
+### Create a backup
+
+Development:
+```bash
+bun run db:backup --output-dir ./backups/postgres
+```
+
+Production:
+```bash
+bun run db:backup:prod --output-dir ./backups/postgres --confirm-production-backup
+```
+
+This creates a complete PostgreSQL custom-format dump (`.dump`) containing schema and data. If you omit `--output-dir`, TermiSend uses `DB_BACKUP_DIR` when configured, otherwise `./backups/postgres`.
+
+### Restore a backup
+
+Development:
+```bash
+bun run db:restore --input ./backups/postgres/termisend-2026-03-08T12-00-00.000Z.dump --confirm-restore
+```
+
+Production:
+```bash
+bun run db:restore:prod --input ./backups/postgres/termisend-2026-03-08T12-00-00.000Z.dump --confirm-restore --confirm-production-restore
+```
+
+Restore uses `pg_restore --clean --if-exists`, so existing database objects are dropped before the backup is reapplied. Install PostgreSQL client tools so `pg_dump` and `pg_restore` are available on your `PATH` before using these commands.
 
 ## Prerequisites
 
@@ -111,7 +143,7 @@ Use the bundled production build to make TermiSend available via a desktop icon:
    bun run shortcut:create
    ```
 
-The helper enforces a Windows-only session, validates that `dist/index.js` exists, and creates a `.lnk` on your desktop that launches Command Prompt (`cmd.exe /k`) before invoking `bun run` so the console window stays open for visibility until you close TermiSend manually. It also applies the TermiSend icon (`assets/termisend.ico`) when present and wires a `Ctrl+Alt+T` hotkey.
+The helper enforces a Windows-only session, validates that `dist/index.js` exists, and creates a `.lnk` on your desktop that launches Command Prompt (`cmd.exe /k`) and runs a generated launcher script so the console window stays open and TermiSend keeps interactive terminal control. It also applies the TermiSend icon (`assets/termisend.ico`) when present and wires a `Ctrl+Alt+T` hotkey.
 
 Customise the shortcut with the following flags:
 
@@ -362,33 +394,36 @@ Your Name
 - Nested spintax supported: `{Hello|Hi {there|friend}}`
 - Placeholders: `{Person Name}`, `{Company Name}`
 
-### Database Reset (Development Only)
+### Database Reset
 
-Reset the database to a clean state during development:
+Reset the database to a clean state. TermiSend provides distinct commands for development and production to prevent accidental data loss.
 
+#### Development Reset
+Recommended for clearing test data:
 ```bash
-# Using CLI flag
-bun run db:reset --confirm-reset
-
-# Or using shorthand
-bun run db:reset -y
-
-# Or using environment variable
-ALLOW_DEV_RESET=true bun run db:reset
+bun run db:reset:dev
 ```
 
-**⚠️ Security Notice:**
-- The database reset feature is **only available in development environments**
-- It will **not work** in production (NODE_ENV=production)
-- It will **not work** if DB_NAME contains "prod" or "production"
-- Always confirm before running to avoid accidental data loss
+#### Production Reset
+Requires explicit bypass flags for safety:
+```bash
+bun run db:reset:prod
+```
+
+**⚠️ Safety Guardrails:**
+- **Environment Block**: Production resets are blocked by default if `NODE_ENV=production`.
+- **Database Name Check**: Resets are blocked if `DB_NAME` contains "prod" or "production".
+- **Explicit Confirmation**: Always requires the `--confirm-reset` flag.
+- **Production Force**: Resets in production require the additional `--force-production-reset` flag.
 
 ## Database Commands
 
 | Command | Description |
 |---------|-------------|
-| `bun run db:init` | Initialize database schema (create tables) |
-| `bun run db:reset` | Reset database (delete all data) - DEV ONLY |
+| `bun run db:init:dev` | Initialize development database schema |
+| `bun run db:init:prod` | Initialize production database schema |
+| `bun run db:reset:dev` | Reset development database (deletes all data) |
+| `bun run db:reset:prod` | Reset production database (requires force flags) |
 
 ## Project Structure
 
@@ -627,12 +662,11 @@ The application implements path validation to prevent path traversal attacks:
 - User must explicitly provide file paths
 
 ### Database Reset Protection
-The database reset feature includes multiple guardrails:
-1. **Environment Check**: Blocked in production (NODE_ENV=production)
-2. **Database Name Check**: Blocked if DB_NAME contains "prod" or "production"
-3. **Explicit Confirmation**: Requires `--confirm-reset` flag or `ALLOW_DEV_RESET=true`
-
-**This makes it impossible to accidentally reset a production database.**
+The database reset feature includes multi-layered guardrails:
+1. **Environment Check**: Blocked in production (`NODE_ENV=production`) unless `--force-production-reset` is used.
+2. **Database Name Check**: Blocked if `DB_NAME` contains "prod" or "production" unless `--force-production-reset` is used.
+3. **Explicit Confirmation**: Always requires the `--confirm-reset` flag (handled automatically by `db:reset:dev/prod` scripts).
+4. **Interactive Safety**: The `db:reset` script is designed to fail early if safety conditions aren't met.
 
 ### Development Safety Controls
 - `REDIRECT_EMAILS`: Redirect all emails to a test address in development
