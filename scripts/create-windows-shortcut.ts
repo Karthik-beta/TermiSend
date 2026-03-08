@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import os from 'node:os';
@@ -132,9 +132,17 @@ if (!iconPath && existsSync(defaultIconPath)) {
 
 const bunPath = process.execPath;
 const escapeShortcutValue = (value: string): string => `"${value.replace(/"/g, '""')}"`;
-const escapeCmdValue = (value: string): string => value.replace(/"/g, '""');
-const cmdAction = `cd /d "${escapeCmdValue(repoRoot)}" && "${escapeCmdValue(bunPath)}" run "${escapeCmdValue(distPath)}"`;
-const cmdArgs = `/k "${cmdAction}"`;
+const launcherPath = resolve(repoRoot, '.termisend-launch.cmd');
+const launcherContents = [
+  '@echo off',
+  `cd /d "${repoRoot}"`,
+  `"${bunPath}" "${distPath}"`,
+  'set TERMISEND_EXIT_CODE=%ERRORLEVEL%',
+  'echo.',
+  'if not "%TERMISEND_EXIT_CODE%"=="0" echo TermiSend exited with code %TERMISEND_EXIT_CODE%.',
+].join('\r\n');
+writeFileSync(launcherPath, launcherContents, 'utf8');
+const cmdArgs = `/k "${launcherPath.replace(/"/g, '""')}"`;
 
 const commands = [
   '$Shell = New-Object -ComObject WScript.Shell',

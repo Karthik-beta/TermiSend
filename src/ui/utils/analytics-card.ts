@@ -68,7 +68,10 @@ function topCard(
 }
 
 export function renderAnalyticsCardSvg(data: PeriodicAnalytics): string {
-  const generatedAt = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+  const generatedAt = new Date()
+    .toISOString()
+    .replace('T', ' ')
+    .replace(/\.\d{3}Z$/, ' UTC');
   const deliveryRate = calculateRate(data.daily.delivered, data.daily.sent);
   const openRate = calculateRate(data.daily.opened, data.daily.delivered);
   const clickRate = calculateRate(data.daily.clicked, data.daily.opened);
@@ -141,18 +144,21 @@ export function renderAnalyticsCardSvg(data: PeriodicAnalytics): string {
 
 export function warmAnalyticsCardRenderer(): Promise<void> {
   if (!warmupPromise) {
-    warmupPromise = sharp(
-      Buffer.from(`
+    const promise = sharp(
+      Buffer.from(
+        `
         <svg width="32" height="32" xmlns="http://www.w3.org/2000/svg">
           <rect width="32" height="32" fill="#000000"/>
           <text x="8" y="22" font-family="'Trebuchet MS', 'Segoe UI', sans-serif" font-size="14" fill="#FFFFFF">T</text>
         </svg>
-      `.trim())
+      `.trim()
+      )
     )
       .jpeg({ quality: 70 })
       .toBuffer()
       .then(() => undefined)
       .catch(() => undefined);
+    warmupPromise = promise;
   }
 
   return warmupPromise;
@@ -164,9 +170,7 @@ export async function generateAnalyticsCardJpeg(data: PeriodicAnalytics): Promis
   const svg = renderAnalyticsCardSvg(data);
   const outputPath = join(tmpdir(), `termisend-analytics-${randomUUID()}.jpg`);
 
-  await sharp(Buffer.from(svg))
-    .jpeg({ quality: 94, mozjpeg: true })
-    .toFile(outputPath);
+  await sharp(Buffer.from(svg)).jpeg({ quality: 94, mozjpeg: true }).toFile(outputPath);
 
   return outputPath;
 }

@@ -60,7 +60,12 @@ function mapAnalyticsEventToActivity(event: AnalyticsEvent): ActivityEvent | nul
     case 'email:failed':
       return createActivityEvent('ses', `Failed sending to ${event.email}`, 'error', now);
     case 'email:skipped':
-      return createActivityEvent('system', `Skipped ${event.email} (${event.reason})`, 'warning', now);
+      return createActivityEvent(
+        'system',
+        `Skipped ${event.email} (${event.reason})`,
+        'warning',
+        now
+      );
     case 'email:delivered':
       return createActivityEvent('ses', 'Delivery confirmed', 'success', now);
     case 'email:bounced':

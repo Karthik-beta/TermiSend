@@ -5,7 +5,7 @@
  */
 
 /** @jsxImportSource react */
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { Box, Text, useInput } from 'ink';
 import type React from 'react';
 import { useEffect, useState } from 'react';
@@ -24,7 +24,9 @@ export function AnalyticsView(): React.ReactElement {
   useEffect(() => {
     let mounted = true;
 
-    void warmAnalyticsCardRenderer();
+    warmAnalyticsCardRenderer().catch(() => {
+      // Ignore warmup errors
+    });
 
     async function refreshData() {
       try {
@@ -52,7 +54,9 @@ export function AnalyticsView(): React.ReactElement {
         case 'email:bounced':
         case 'email:complained':
         case 'contact:verified':
-          void refreshData();
+          refreshData().catch(() => {
+            // Ignore refresh errors
+          });
           break;
       }
     };
@@ -68,7 +72,9 @@ export function AnalyticsView(): React.ReactElement {
   useInput((input, _key) => {
     if (input.toLowerCase() === 'c' && data) {
       setCopyStatus('Rendering share card...');
-      void copyAnalyticsCardToClipboard(data, setCopyStatus);
+      copyAnalyticsCardToClipboard(data, setCopyStatus).catch(() => {
+        setCopyStatus('Failed to copy image');
+      });
     }
   });
 
@@ -207,20 +213,26 @@ async function copyAnalyticsCardToClipboard(
   try {
     const imagePath = await generateAnalyticsCardJpeg(data);
     const escapedPath = imagePath.replaceAll("'", "''");
-    const command =
-      `powershell.exe -NoProfile -STA -Command "` +
-      `Add-Type -AssemblyName System.Windows.Forms; ` +
-      `Add-Type -AssemblyName System.Drawing; ` +
-      `$img = [System.Drawing.Image]::FromFile('${escapedPath}'); ` +
-      `[System.Windows.Forms.Clipboard]::SetImage($img); ` +
-      `$img.Dispose()"`;
+    const powershellArgs = [
+      '-NoProfile',
+      '-STA',
+      '-Command',
+      `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile('${escapedPath}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`,
+    ];
 
-    exec(command, (error) => {
-      if (error) {
+    const ps = spawn('powershell.exe', powershellArgs);
+
+    ps.on('close', (code) => {
+      if (code !== 0) {
         setCopyStatus('Failed to copy image');
       } else {
         setCopyStatus('Shareable image copied!');
       }
+      setTimeout(() => setCopyStatus(null), 3000);
+    });
+
+    ps.on('error', () => {
+      setCopyStatus('Failed to start copy process');
       setTimeout(() => setCopyStatus(null), 3000);
     });
   } catch {
