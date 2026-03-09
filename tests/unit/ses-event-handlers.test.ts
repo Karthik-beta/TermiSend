@@ -63,6 +63,7 @@ describe('SES Event Handlers Module', () => {
       dbModule.incrementSendLogClicks,
       dbModule.suppressContact,
       dbModule.recordEngagementEvent,
+      dbModule.recordAnalyticsEvent,
     ];
     
     for (const fn of mockDbFns) {
@@ -79,6 +80,7 @@ describe('SES Event Handlers Module', () => {
     spyOn(dbModule, 'incrementSendLogClicks').mockImplementation(() => Promise.resolve());
     spyOn(dbModule, 'suppressContact').mockImplementation(() => Promise.resolve());
     spyOn(dbModule, 'recordEngagementEvent').mockImplementation(() => Promise.resolve());
+    spyOn(dbModule, 'recordAnalyticsEvent').mockImplementation(() => Promise.resolve());
   });
 
   // ============================================================================
@@ -404,15 +406,22 @@ describe('SES Event Handlers Module', () => {
   // ============================================================================
 
   describe('handleOpenEvent()', () => {
-    it('should increment send log open count', async () => {
+    it('should record a single open via the engagement helper', async () => {
       const event = createParsedOpenEvent();
       const result = await handleOpenEvent(event);
 
       expect(result.success).toBe(true);
-      expect(dbModule.incrementSendLogOpens).toHaveBeenCalledWith(
+      expect(dbModule.recordEngagementEvent).toHaveBeenCalledWith(
         mockSendLog.id,
-        expect.any(Date)
+        mockSendLog.contactId,
+        'open',
+        expect.objectContaining({
+          timestamp: expect.any(Date),
+          ipAddress: event.data.ipAddress,
+          userAgent: event.data.userAgent,
+        })
       );
+      expect(dbModule.incrementSendLogOpens).not.toHaveBeenCalled();
     });
 
     it('should record engagement event', async () => {
@@ -469,18 +478,23 @@ describe('SES Event Handlers Module', () => {
   // ============================================================================
 
   describe('handleClickEvent()', () => {
-    it('should increment send log click count', async () => {
+    it('should record a single click via the engagement helper', async () => {
       const event = createParsedClickEvent();
       const result = await handleClickEvent(event);
 
       expect(result.success).toBe(true);
-      expect(dbModule.incrementSendLogClicks).toHaveBeenCalledWith(
+      expect(dbModule.recordEngagementEvent).toHaveBeenCalledWith(
         mockSendLog.id,
+        mockSendLog.contactId,
+        'click',
         expect.objectContaining({
           timestamp: expect.any(Date),
           link: event.data.link,
+          ipAddress: event.data.ipAddress,
+          userAgent: event.data.userAgent,
         })
       );
+      expect(dbModule.incrementSendLogClicks).not.toHaveBeenCalled();
     });
 
     it('should record engagement event', async () => {

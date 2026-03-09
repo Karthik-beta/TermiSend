@@ -1,5 +1,12 @@
 import { describe, expect, it, beforeEach, spyOn, afterEach } from 'bun:test';
-import { shouldRedirectEmails, shouldSimulateVerifier, getTestRecipientEmail, getEnv, resetEnvCacheForTesting } from '../../src/config.js';
+import {
+  shouldBypassVerifierApi,
+  shouldRedirectEmails,
+  shouldSimulateVerifier,
+  getTestRecipientEmail,
+  getEnv,
+  resetEnvCacheForTesting,
+} from '../../src/config.js';
 import { sendEmail } from '../../src/ses.js';
 import { verifyEmail, fetchVerifierCredits } from '../../src/verifier.js';
 import * as security from '../../src/utils/security.js';
@@ -46,7 +53,8 @@ describe('Environment Separation', () => {
 
     it('should throw error if TEST_RECIPIENT_EMAIL is missing in development when redirection is enabled', () => {
       process.env.NODE_ENV = 'development';
-      delete process.env.TEST_RECIPIENT_EMAIL;
+      process.env.TEST_RECIPIENT_EMAIL = '';
+      resetEnvCacheForTesting();
 
       expect(() => getTestRecipientEmail()).toThrow('TEST_RECIPIENT_EMAIL must be configured when not in production');
     });
@@ -112,6 +120,18 @@ describe('Environment Separation', () => {
       // Credits should be null when no API key is configured
       // or a real number when API key is present (not the hardcoded 10000)
       expect(credits === null || credits !== 10000).toBe(true);
+    });
+
+    it('should allow bypassing MyEmailVerifier in production via env flag', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.BYPASS_MYEMAILVERIFIER_API = 'true';
+      resetEnvCacheForTesting();
+
+      const result = await verifyEmail(`test-invalid-${Date.now()}@example.com`);
+
+      expect(shouldBypassVerifierApi()).toBe(true);
+      expect(result.status).toBe('invalid');
+      expect(result.message).toContain('Simulated');
     });
   });
 });

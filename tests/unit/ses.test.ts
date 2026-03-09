@@ -44,6 +44,7 @@ import {
   verifyConfiguration,
   __test as sesTest,
 } from '../../src/ses.js';
+import { resetEnvCacheForTesting } from '../../src/config.js';
 import { getAccountInfo } from '../../src/ses-quota.js';
 import {
   enableSESTestMode,
@@ -58,6 +59,7 @@ import {
   simulateQuotaExceeded,
   simulateTransientFailures,
   getMockSESCallCount,
+  getMockSESCalls,
   getMockSESClient,
 } from '../helpers/mock-ses.js';
 import { EmailThrottleController } from '../../src/throttle.js';
@@ -68,6 +70,7 @@ describe('SES Module', () => {
     // SES module uses lazy initialization and dynamic env var reading
     // No explicit reset needed - each test sets its own env vars
     restoreEnv();
+    resetEnvCacheForTesting();
     resetMockSESState();
     enableSESTestMode();
 
@@ -96,6 +99,7 @@ describe('SES Module', () => {
         AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
         AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
         SES_FROM_EMAIL: 'sender@example.com',
+        SES_CONFIGURATION_SET: 'termisend-analytics',
         AWS_REGION: 'us-east-1',
       });
 
@@ -104,6 +108,20 @@ describe('SES Module', () => {
       expect(result.configured).toBe(true);
       expect(result.hasCredentials).toBe(true);
       expect(result.issues).toHaveLength(0);
+    });
+
+    it('should report missing configuration set when analytics is enabled', () => {
+      setMockEnv({
+        AWS_ACCESS_KEY_ID: 'test',
+        AWS_SECRET_ACCESS_KEY: 'test',
+        SES_FROM_EMAIL: 'sender@example.com',
+      });
+      clearMockEnv('SES_CONFIGURATION_SET');
+
+      const result = verifyConfiguration();
+
+      expect(result.configured).toBe(false);
+      expect(result.issues.some((issue) => issue.includes('SES_CONFIGURATION_SET'))).toBe(true);
     });
 
     it('should detect missing credentials', () => {
@@ -158,6 +176,40 @@ describe('SES Module', () => {
       // Should return failure, not throw
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
+    });
+  });
+
+  describe('Configuration Set Integration', () => {
+    it('should attach SES configuration set to raw email sends', async () => {
+      setMockEnv({
+        AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+        AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        SES_FROM_EMAIL: 'sender@example.com',
+        SES_CONFIGURATION_SET: 'termisend-analytics',
+        AWS_REGION: 'us-east-1',
+      });
+
+      const controller = EmailThrottleController.getInstance();
+      spyOn(controller, 'checkQuota').mockImplementation(() => Promise.resolve(true));
+      spyOn(controller, 'acquireSendPermission').mockImplementation(() => Promise.resolve());
+      spyOn(controller, 'releaseSendPermission').mockImplementation(() => {});
+
+      const result = await sendEmail(
+        {
+          to: 'test@example.com',
+          subject: 'Test',
+          htmlBody: '<p>Hello</p>',
+          textBody: 'Hello',
+        },
+        controller,
+        getMockSESClient() as never
+      );
+
+      expect(result.success).toBe(true);
+
+      const calls = getMockSESCalls();
+      const command = calls[calls.length - 1] as { input?: { ConfigurationSetName?: string } };
+      expect(command.input?.ConfigurationSetName).toBe('termisend-analytics');
     });
   });
 

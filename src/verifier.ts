@@ -3,7 +3,7 @@
  * Handles MyEmailVerifier API integration for email validation
  */
 
-import { getEnv, shouldSimulateVerifier } from './config.js';
+import { getEnv, shouldBypassVerifierApi, shouldSimulateVerifier } from './config.js';
 import { updateEmailVerifierCredits } from './db.js';
 import {
   createEvent,
@@ -154,6 +154,14 @@ export async function verifyEmail(email: string): Promise<EmailVerificationRespo
   const rateLimitCheck = verificationRateLimiter.checkLimit(email.toLowerCase());
   if (!rateLimitCheck.allowed) {
     throw new RateLimitError(rateLimitCheck.retryAfterMs || 5000);
+  }
+
+  // Explicit bypass for experiments in any environment.
+  if (shouldBypassVerifierApi()) {
+    await logger.info(`BYPASS: Skipping MyEmailVerifier API for ${redactEmail(email)}`);
+    const simulatedResponse = await simulateVerifyEmail(email);
+    await logger.logApiVerifierResponse(email, simulatedResponse);
+    return simulatedResponse;
   }
 
   // Handle simulation in development

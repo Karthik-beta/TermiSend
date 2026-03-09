@@ -48,6 +48,34 @@ mock.module('../../src/config.js', () => {
       DB_PASS: 'test',
       DB_NAME: 'test_db',
     }),
+    getThrottleConfig: () => ({
+      minDelayMs: 60000,
+      maxDelayMs: 120000,
+      breakProbabilityPercent: 5,
+      breakMinMinutes: 3,
+      breakMaxMinutes: 5,
+    }),
+    getSesRateLimit: () => 14,
+    getQuotaBufferPercent: () => 10,
+    getTestRecipientEmail: () => process.env.TEST_RECIPIENT_EMAIL || 'test@example.com',
+    shouldSimulateVerifier: () => process.env.SIMULATE_VERIFIER !== 'false',
+    shouldRedirectEmails: () => process.env.NODE_ENV !== 'production',
+    isListUnsubscribeEnabled: () => true,
+    getAnalyticsConfig: () => ({
+      enabled: process.env.ANALYTICS_ENABLED !== 'false',
+      syncIntervalMinutes: Number.parseInt(process.env.ANALYTICS_SYNC_INTERVAL_MINUTES || '60', 10),
+      retentionDays: Number.parseInt(process.env.ANALYTICS_RETENTION_DAYS || '90', 10),
+    }),
+    getAnalyticsRateLimitMs: () => 1000,
+    getSESConfigurationSetName: () =>
+      process.env.SES_CONFIGURATION_SET?.trim()
+        ? process.env.SES_CONFIGURATION_SET.trim()
+        : undefined,
+    getEmailTemplatePath: () => '/tmp/email-template.md',
+    getSubjectTemplatePath: () => '/tmp/subject-template.txt',
+    getSQSConfig: () => null,
+    isSQSConsumerEnabled: () => false,
+    resetEnvCacheForTesting: () => {},
   };
 });
 
@@ -897,4 +925,3 @@ import { afterAll } from "bun:test";
 afterAll(() => {
   mock.restore();
 });
-

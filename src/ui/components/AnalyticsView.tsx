@@ -152,7 +152,7 @@ export function AnalyticsView(): React.ReactElement {
           </Box>
           <Box width={12}>
             <Text bold={true} color={colors.primary}>
-              Last 24h
+              Today IST
             </Text>
           </Box>
           <Box width={12}>
@@ -171,11 +171,16 @@ export function AnalyticsView(): React.ReactElement {
         {renderRow('Delivered', 'delivered', colors.successBright)}
         {renderRow('Opened', 'opened', colors.primary)}
         {renderRow('Clicked', 'clicked', colors.primaryBright)}
+        {renderRow('Total Opens', 'totalOpens', colors.primary)}
+        {renderRow('Total Clicks', 'totalClicks', colors.primaryBright)}
         {renderRow('Failed', 'failed', colors.error)}
         {renderRow('Verified', 'verified', colors.info)}
         {renderRow('Invalid', 'invalid', colors.error)}
         {renderRow('Bounced', 'bounced', colors.warning)}
+        {renderRow('Hard Bounce', 'hardBounced', colors.warning)}
+        {renderRow('Soft Bounce', 'softBounced', colors.info)}
         {renderRow('Complained', 'complained', colors.error)}
+        {renderRow('Avg Deliv ms', 'averageDeliveryTimeMs', colors.info)}
 
         <Box marginTop={1} marginBottom={1}>
           <Text dimColor={true}>-------------------------------------------</Text>

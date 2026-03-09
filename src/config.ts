@@ -161,6 +161,16 @@ export function shouldSimulateVerifier(): boolean {
 }
 
 /**
+ * Check if the MyEmailVerifier API should be bypassed entirely.
+ * This is an explicit experiment switch and works in any environment.
+ */
+export function shouldBypassVerifierApi(): boolean {
+  const env = getEnv();
+  const bypass = env.BYPASS_MYEMAILVERIFIER_API || process.env.BYPASS_MYEMAILVERIFIER_API;
+  return bypass === 'true';
+}
+
+/**
  * Check if outgoing emails should be redirected to test email
  * ALWAYS returns true in non-production environments to prevent accidental sending.
  */
@@ -214,6 +224,16 @@ export function getAnalyticsRateLimitMs(): number {
   const env = getEnv();
   // Default to 1000ms (1 req/sec) as per AWS SES API limits
   return Number.parseInt(env.ANALYTICS_RATE_LIMIT_MS || '1000', 10);
+}
+
+/**
+ * Get the SES configuration set used for event publishing on outbound mail.
+ * This is required for per-message SES event publishing with SendRawEmail.
+ */
+export function getSESConfigurationSetName(): string | undefined {
+  const env = getEnv();
+  const value = env.SES_CONFIGURATION_SET || process.env.SES_CONFIGURATION_SET;
+  return value?.trim() ? value.trim() : undefined;
 }
 
 // ============================================================================

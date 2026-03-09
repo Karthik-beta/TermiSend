@@ -8,7 +8,13 @@ import {
   SendRawEmailCommand,
   type SendRawEmailCommandInput,
 } from '@aws-sdk/client-ses';
-import { getTestRecipientEmail, isListUnsubscribeEnabled, shouldRedirectEmails } from './config.js';
+import {
+  getAnalyticsConfig,
+  getSESConfigurationSetName,
+  getTestRecipientEmail,
+  isListUnsubscribeEnabled,
+  shouldRedirectEmails,
+} from './config.js';
 import {
   createEvent,
   DomainEventType,
@@ -34,6 +40,7 @@ const RETRY_BASE_DELAY_MS = 1000;
 
 /** Maximum delay for exponential backoff (ms) - 10 seconds */
 const MAX_BACKOFF_DELAY_MS = 10000;
+let hasWarnedMissingAnalyticsConfigSet = false;
 
 // Test-only variable for client override
 let testClientOverride: SESClient | null = null;
@@ -182,11 +189,18 @@ function constructSendRawEmailInput(
   fromEmail: string
 ): SendRawEmailCommandInput {
   const rawMessage = buildRawMimeMessage(params, fromEmail);
-  return {
+  const input: SendRawEmailCommandInput = {
     RawMessage: {
       Data: new TextEncoder().encode(rawMessage),
     },
   };
+
+  const configurationSetName = getSESConfigurationSetName();
+  if (configurationSetName) {
+    input.ConfigurationSetName = configurationSetName;
+  }
+
+  return input;
 }
 
 /**
@@ -317,6 +331,21 @@ export function sendEmail(
     return Promise.resolve({ success: false, error: 'Missing parameters' });
   }
 
+  if (
+    getAnalyticsConfig().enabled &&
+    !getSESConfigurationSetName() &&
+    !hasWarnedMissingAnalyticsConfigSet
+  ) {
+    hasWarnedMissingAnalyticsConfigSet = true;
+    logger
+      .warn(
+        'SES analytics is enabled but SES_CONFIGURATION_SET is not configured. Delivery, bounce, complaint, open, and click events will not be published for SendRawEmail traffic.'
+      )
+      .catch(() => {
+        // Ignore logging errors
+      });
+  }
+
   // Handle environment-based redirection
   let finalTo = params.to;
   let finalSubject = params.subject;
@@ -363,14 +392,22 @@ export function verifyConfiguration() {
   const sesFromEmail = getSESFromEmail();
   const quotaConfig = verifySesConfiguration();
   const issues = [...quotaConfig.issues];
+  const analyticsConfig = getAnalyticsConfig();
+  const configurationSetName = getSESConfigurationSetName();
   if (!sesFromEmail) {
     issues.push('SES_FROM_EMAIL is not configured');
+  }
+  if (analyticsConfig.enabled && !configurationSetName) {
+    issues.push(
+      'SES_CONFIGURATION_SET is not configured. SES event publishing analytics will be incomplete for SendRawEmail traffic.'
+    );
   }
 
   return {
     configured: issues.length === 0,
     region: quotaConfig.region,
     fromEmail: sesFromEmail || '',
+    configurationSetName: configurationSetName || '',
     hasCredentials: quotaConfig.hasCredentials,
     issues,
   };

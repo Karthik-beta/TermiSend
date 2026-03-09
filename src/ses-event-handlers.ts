@@ -7,8 +7,6 @@ import {
   confirmSendLogDelivery,
   createSESEventTracking,
   getSendLogByMessageId,
-  incrementSendLogClicks,
-  incrementSendLogOpens,
   recordAnalyticsEvent,
   recordEngagementEvent,
   suppressContact,
@@ -493,11 +491,10 @@ export async function handleOpenEvent(
     updatedSendLogIds.push(sendLog.id);
     affectedContactIds.push(sendLog.contactId);
 
-    // Record open event
     const openTime = new Date(event.data.timestamp);
-    await incrementSendLogOpens(sendLog.id, openTime);
 
-    // Record engagement event
+    // Record the open once through the engagement helper so counts and
+    // first-open timestamps stay in sync without double incrementing.
     await recordEngagementEvent(sendLog.id, sendLog.contactId, 'open', {
       timestamp: openTime,
       ipAddress: event.data.ipAddress,
@@ -573,14 +570,10 @@ export async function handleClickEvent(
     updatedSendLogIds.push(sendLog.id);
     affectedContactIds.push(sendLog.contactId);
 
-    // Record click event
     const clickTime = new Date(event.data.timestamp);
-    await incrementSendLogClicks(sendLog.id, {
-      timestamp: clickTime,
-      link: event.data.link,
-    });
 
-    // Record engagement event
+    // Record the click once through the engagement helper so counts and
+    // first-click timestamps stay in sync without double incrementing.
     await recordEngagementEvent(sendLog.id, sendLog.contactId, 'click', {
       timestamp: clickTime,
       link: event.data.link,

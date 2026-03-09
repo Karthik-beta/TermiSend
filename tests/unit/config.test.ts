@@ -10,6 +10,7 @@ import {
   getEnv,
   getQuotaBufferPercent,
   getSesRateLimit,
+  shouldBypassVerifierApi,
   getThrottleConfig,
   loadEnv,
   resetEnvCacheForTesting,
@@ -21,6 +22,28 @@ describe('Configuration Module', () => {
     // Reset environment cache before each test
     resetEnvCacheForTesting();
     restoreEnv();
+  });
+
+  describe('shouldBypassVerifierApi()', () => {
+    it('should default to false when not configured', () => {
+      resetEnvCacheForTesting();
+
+      expect(shouldBypassVerifierApi()).toBe(false);
+    });
+
+    it('should return true when BYPASS_MYEMAILVERIFIER_API is true', () => {
+      setMockEnv({ BYPASS_MYEMAILVERIFIER_API: 'true' });
+      resetEnvCacheForTesting();
+
+      expect(shouldBypassVerifierApi()).toBe(true);
+    });
+
+    it('should return false when BYPASS_MYEMAILVERIFIER_API is false', () => {
+      setMockEnv({ BYPASS_MYEMAILVERIFIER_API: 'false' });
+      resetEnvCacheForTesting();
+
+      expect(shouldBypassVerifierApi()).toBe(false);
+    });
   });
 
   // ============================================================================

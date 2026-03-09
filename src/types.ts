@@ -912,11 +912,16 @@ export interface PeriodicStats {
   delivered: number;
   opened: number;
   clicked: number;
+  totalOpens: number;
+  totalClicks: number;
   failed: number;
   verified: number;
   invalid: number;
   bounced: number;
+  hardBounced: number;
+  softBounced: number;
   complained: number;
+  averageDeliveryTimeMs: number;
 }
 
 /**
