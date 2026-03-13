@@ -13,16 +13,13 @@ import {
 import { getSQSConfig } from './config.js';
 import { logger } from './logger.js';
 import { processSESEvent } from './ses-event-handlers.js';
-import { parseSESEvent } from './ses-events.js';
+import { parseSESEventMessage } from './ses-events.js';
 import { isShuttingDown } from './shutdown.js';
 import type { EventProcessingResult, SQSConsumerStatus, SQSMessage } from './types.js';
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/** Maximum retries for message processing */
-const MAX_PROCESSING_RETRIES = 3;
 
 /** Delay before retrying failed messages (seconds) */
 const RETRY_VISIBILITY_TIMEOUT_SECONDS = 60;
@@ -241,13 +238,19 @@ async function pollAndProcessMessages(): Promise<number> {
             await deleteMessage(message.receiptHandle);
           }
         } else {
-          // Handle processing failure with retry logic
-          const receiveCount = getReceiveCount(message);
-          await handleProcessingError(
-            message,
-            new Error(result.error || 'Unknown error'),
-            receiveCount
-          );
+          if (result.nonRetryable) {
+            await handlePermanentProcessingFailure(
+              message,
+              new Error(result.error || 'Unknown error')
+            );
+          } else {
+            const receiveCount = getReceiveCount(message);
+            await handleProcessingError(
+              message,
+              new Error(result.error || 'Unknown error'),
+              receiveCount
+            );
+          }
         }
       } catch (error) {
         const receiveCount = getReceiveCount(message);
@@ -332,25 +335,36 @@ export async function processMessage(message: SQSMessage): Promise<EventProcessi
     return {
       success: false,
       error: 'Empty message body',
+      nonRetryable: true,
       affectedContactIds: [],
       updatedSendLogIds: [],
     };
   }
 
-  // Parse SES event from message
-  const event = parseSESEvent(message.body);
+  const parseResult = parseSESEventMessage(message.body);
 
-  if (!event) {
+  if (parseResult.kind === 'skip') {
+    logger.info(parseResult.reason).catch((e) => console.error('Log failed:', e));
     return {
       success: false,
-      error: 'Failed to parse SES event from message',
+      error: parseResult.reason,
+      nonRetryable: true,
       affectedContactIds: [],
       updatedSendLogIds: [],
     };
   }
 
-  // Process the event
-  return await processSESEvent(event);
+  if (parseResult.kind === 'invalid') {
+    return {
+      success: false,
+      error: parseResult.reason,
+      nonRetryable: true,
+      affectedContactIds: [],
+      updatedSendLogIds: [],
+    };
+  }
+
+  return await processSESEvent(parseResult.event);
 }
 
 /**
@@ -434,10 +448,10 @@ export async function handleProcessingError(
     .warn(`Message processing failed (attempt ${receiveCount}): ${error.message}`)
     .catch((e) => console.error('Log failed:', e));
 
-  if (receiveCount >= MAX_PROCESSING_RETRIES) {
+  if (receiveCount >= sqsConfig.maxReceiveCount) {
     // Max retries reached - delete message (will go to DLQ if configured)
     logger
-      .warn(`Max retries (${MAX_PROCESSING_RETRIES}) reached, deleting message`)
+      .warn(`Max retries (${sqsConfig.maxReceiveCount}) reached, deleting message`)
       .catch((e) => console.error('Log failed:', e));
 
     if (sqsConfig.autoDelete) {
@@ -446,6 +460,24 @@ export async function handleProcessingError(
   } else {
     // Return to queue for retry
     await returnMessageForRetry(message.receiptHandle, RETRY_VISIBILITY_TIMEOUT_SECONDS);
+  }
+}
+
+async function handlePermanentProcessingFailure(message: SQSMessage, error: Error): Promise<void> {
+  const config = getSQSConfig();
+  if (!config) {
+    throw new Error('SQS is not configured');
+  }
+
+  consumerStatus.messagesFailed++;
+  consumerStatus.lastError = error.message;
+
+  logger
+    .warn(`Dropping non-retryable SQS message: ${error.message}`)
+    .catch((e) => console.error('Log failed:', e));
+
+  if (config.autoDelete) {
+    await deleteMessage(message.receiptHandle);
   }
 }
 

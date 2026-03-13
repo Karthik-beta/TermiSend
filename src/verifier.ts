@@ -3,7 +3,12 @@
  * Handles MyEmailVerifier API integration for email validation
  */
 
-import { getEnv, shouldBypassVerifierApi, shouldSimulateVerifier } from './config.js';
+import {
+  getAllowedVerificationOutcomes,
+  getEnv,
+  shouldBypassVerifierApi,
+  shouldSimulateVerifier,
+} from './config.js';
 import { updateEmailVerifierCredits } from './db.js';
 import {
   createEvent,
@@ -452,19 +457,8 @@ export function mapRawResponseToInternal(data: Record<string, unknown>): EmailVe
  * @returns boolean indicating if email is safe
  */
 export function isEmailSafe(result: EmailVerificationResponse): boolean {
-  // Safe to send if:
-  // - Status is 'valid' and risk is 'low'
-  // - Status is 'catch-all' and risk is 'low' or 'medium'
-
-  if (result.status === 'valid' && result.risk === 'low') {
-    return true;
-  }
-
-  if (result.status === 'catch-all' && (result.risk === 'low' || result.risk === 'medium')) {
-    return true;
-  }
-
-  return false;
+  const allowedOutcomes = getAllowedVerificationOutcomes();
+  return allowedOutcomes.has(`${result.status}:${result.risk}`);
 }
 
 /**

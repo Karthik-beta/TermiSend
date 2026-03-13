@@ -15,6 +15,7 @@ import type {
   AnalyticsEventType,
   AuditLog,
   Contact,
+  ContactSuppression,
   EmailVerifierCredits,
   IdentityStatus,
   JSONValue,
@@ -26,11 +27,16 @@ import type {
   SendMode,
   SendStatistics,
   SendStats,
+  SuppressionType,
 } from './types.js';
-import { isProduction } from './utils/security.js';
+import { isProduction, validateEmailFormat } from './utils/security.js';
 
 // Fixed singleton ID for the email_verifier_credits table (singleton pattern)
 const EMAIL_VERIFIER_CREDITS_SINGLETON_ID = '00000000-0000-0000-0000-000000000001';
+
+function normalizeEmailAddress(email: string): string {
+  return email.trim().toLowerCase();
+}
 
 // ============================================================================
 // Lazy PostgreSQL Client Setup
@@ -369,11 +375,12 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_ses_event_tracking_occurred_at ON ses_event_tracking(occurred_at)
     `;
 
-    // Create contact_suppressions table for bounce/complaint tracking
+    // Create contact_suppressions table for bounce/complaint/unsubscribe tracking
     await sql`
       CREATE TABLE IF NOT EXISTS contact_suppressions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE,
+        email VARCHAR(255) NOT NULL,
         suppression_type VARCHAR(50) NOT NULL,
         suppression_reason VARCHAR(255) NOT NULL,
         ses_message_id VARCHAR(255),
@@ -383,12 +390,50 @@ export async function initializeSchema(): Promise<void> {
       )
     `;
 
+    // Backward-compatible schema updates for older installs
+    await sql`
+      ALTER TABLE contact_suppressions
+      ADD COLUMN IF NOT EXISTS email VARCHAR(255)
+    `;
+    await sql`
+      ALTER TABLE contact_suppressions
+      ALTER COLUMN contact_id DROP NOT NULL
+    `;
+    await sql`
+      UPDATE contact_suppressions
+      SET email = LOWER(TRIM(email))
+      WHERE email IS NOT NULL
+        AND email <> LOWER(TRIM(email))
+    `;
+    await sql`
+      UPDATE contact_suppressions cs
+      SET
+        email = LOWER(TRIM(c.email)),
+        contact_id = COALESCE(cs.contact_id, c.id)
+      FROM contacts c
+      WHERE cs.contact_id = c.id
+        AND (
+          cs.email IS NULL
+          OR cs.email <> LOWER(TRIM(c.email))
+          OR cs.contact_id IS NULL
+        )
+    `;
+
     // Indexes for contact_suppressions
     await sql`
       CREATE INDEX IF NOT EXISTS idx_contact_suppressions_contact_id ON contact_suppressions(contact_id)
     `;
     await sql`
       CREATE INDEX IF NOT EXISTS idx_contact_suppressions_type ON contact_suppressions(suppression_type)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_contact_suppressions_email
+      ON contact_suppressions(LOWER(email))
+    `;
+    await sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_suppressions_email_type_unique
+      ON contact_suppressions(LOWER(email), suppression_type)
+      WHERE email IS NOT NULL
     `;
 
     // Create indexes on message_events for common query patterns
@@ -449,7 +494,7 @@ export async function initializeSchema(): Promise<void> {
     await logger.info('Database initialized successfully', {
       database: dbConfig.database,
       tables:
-        'contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, analytics_events',
+        'contacts, send_logs, audit_logs, email_verifier_credits, ses_quota_snapshots, ses_send_statistics, ses_identity_status, ses_message_events, ses_event_tracking, contact_suppressions, analytics_events',
     });
   } catch (error) {
     throw new Error(
@@ -462,6 +507,17 @@ export async function initializeSchema(): Promise<void> {
 // Contact Operations
 // ============================================================================
 
+async function linkSuppressionsToContact(contactId: string, email: string): Promise<void> {
+  const normalizedEmail = normalizeEmailAddress(email);
+
+  await sql`
+    UPDATE contact_suppressions
+    SET contact_id = ${contactId}
+    WHERE email = ${normalizedEmail}
+      AND contact_id IS NULL
+  `;
+}
+
 /**
  * Insert a new contact into the database
  */
@@ -470,14 +526,16 @@ export async function insertContact(
   personName: string,
   email: string
 ): Promise<Contact> {
+  const normalizedEmail = normalizeEmailAddress(email);
   const [contact] = await sql<Contact[]>`
     INSERT INTO contacts (company_name, person_name, email)
-    VALUES (${companyName}, ${personName}, ${email})
+    VALUES (${companyName}, ${personName}, ${normalizedEmail})
     ON CONFLICT (email) DO UPDATE SET
       company_name = EXCLUDED.company_name,
       person_name = EXCLUDED.person_name
     RETURNING *
   `;
+  await linkSuppressionsToContact(contact.id, contact.email);
   return contact;
 }
 
@@ -490,13 +548,19 @@ export async function insertContactSkipDuplicate(
   personName: string,
   email: string
 ): Promise<Contact | null> {
+  const normalizedEmail = normalizeEmailAddress(email);
   const result = await sql<Contact[]>`
     INSERT INTO contacts (company_name, person_name, email)
-    VALUES (${companyName}, ${personName}, ${email})
+    VALUES (${companyName}, ${personName}, ${normalizedEmail})
     ON CONFLICT (email) DO NOTHING
     RETURNING *
   `;
-  return result.length > 0 ? result[0] : null;
+  if (result.length === 0) {
+    return null;
+  }
+
+  await linkSuppressionsToContact(result[0].id, result[0].email);
+  return result[0];
 }
 
 /**
@@ -526,6 +590,7 @@ export async function getEligibleContacts(limit: number = 1000): Promise<Contact
     WHERE NOT EXISTS (
       SELECT 1 FROM contact_suppressions cs
       WHERE cs.contact_id = c.id
+         OR (cs.email IS NOT NULL AND LOWER(cs.email) = LOWER(c.email))
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
@@ -561,6 +626,7 @@ export async function getEligibleContactCount(): Promise<number> {
     WHERE NOT EXISTS (
       SELECT 1 FROM contact_suppressions cs
       WHERE cs.contact_id = c.id
+         OR (cs.email IS NOT NULL AND LOWER(cs.email) = LOWER(c.email))
     )
     AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
@@ -586,10 +652,24 @@ export async function getEligibleContactCount(): Promise<number> {
  * Check if contact exists by email
  */
 export async function contactExists(email: string): Promise<boolean> {
+  const normalizedEmail = normalizeEmailAddress(email);
   const [result] = await sql<{ exists: boolean }[]>`
-    SELECT EXISTS(SELECT 1 FROM contacts WHERE email = ${email})
+    SELECT EXISTS(SELECT 1 FROM contacts WHERE LOWER(email) = ${normalizedEmail})
   `;
   return result?.exists ?? false;
+}
+
+/**
+ * Get a contact by email address
+ */
+export async function getContactByEmail(email: string): Promise<Contact | null> {
+  const normalizedEmail = normalizeEmailAddress(email);
+  const [contact] = await sql<Contact[]>`
+    SELECT * FROM contacts
+    WHERE LOWER(email) = ${normalizedEmail}
+    LIMIT 1
+  `;
+  return contact ?? null;
 }
 
 // ============================================================================
@@ -700,9 +780,25 @@ export async function getSendStats(): Promise<SendStats> {
     SELECT COUNT(*) as count
     FROM contacts c
     WHERE NOT EXISTS (
+      SELECT 1 FROM contact_suppressions cs
+      WHERE cs.contact_id = c.id
+         OR (cs.email IS NOT NULL AND LOWER(cs.email) = LOWER(c.email))
+    )
+    AND NOT EXISTS (
       SELECT 1 FROM send_logs sl
       WHERE sl.contact_id = c.id
-      AND sl.status = 'sent'
+      AND sl.status IN ('sent', 'delivered')
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM send_logs sl
+      WHERE sl.contact_id = c.id
+      AND sl.status = 'failed'
+      AND sl.retry_count >= 2
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM analytics_events ae
+      WHERE ae.contact_id = c.id
+      AND ae.event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
     )
   `;
 
@@ -763,6 +859,7 @@ export async function getAnalyticsCounts(): Promise<{
       WHERE NOT EXISTS (
         SELECT 1 FROM contact_suppressions cs
         WHERE cs.contact_id = c.id
+           OR (cs.email IS NOT NULL AND LOWER(cs.email) = LOWER(c.email))
       )
       AND NOT EXISTS (
         SELECT 1 FROM send_logs sl
@@ -2281,31 +2378,41 @@ export async function createSESEventTracking(eventData: {
  * @param suppressionData - Suppression details
  */
 export async function createContactSuppression(suppressionData: {
-  contactId: string;
-  suppressionType: 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
+  contactId?: string;
+  email: string;
+  suppressionType: SuppressionType;
   suppressionReason: string;
   sesMessageId?: string;
   originalEventData?: Record<string, unknown>;
-}): Promise<void> {
+}): Promise<boolean> {
   try {
+    const validation = validateEmailFormat(suppressionData.email);
+    if (!validation.valid) {
+      throw new Error(validation.error || 'Invalid email format');
+    }
+
+    const normalizedEmail = normalizeEmailAddress(suppressionData.email);
     const serializedData = suppressionData.originalEventData
       ? serializeEventData(suppressionData.originalEventData)
       : {};
-    await sql`
+    const result = await sql<{ id: string }[]>`
       INSERT INTO contact_suppressions (
-        contact_id, suppression_type, suppression_reason, ses_message_id, original_event_data
+        contact_id, email, suppression_type, suppression_reason, ses_message_id, original_event_data
       ) VALUES (
-        ${suppressionData.contactId}, ${suppressionData.suppressionType},
+        ${suppressionData.contactId ?? null}, ${normalizedEmail}, ${suppressionData.suppressionType},
         ${suppressionData.suppressionReason}, ${suppressionData.sesMessageId ?? null},
         ${sql.json(serializedData)}
       )
-      ON CONFLICT (contact_id, suppression_type) DO NOTHING
+      ON CONFLICT DO NOTHING
+      RETURNING id
     `;
+    return result.length > 0;
   } catch (error) {
     logger.warn(
       `Failed to create contact suppression: ${error instanceof Error ? error.message : String(error)}`
     );
     // Don't throw - suppression failures should not block processing
+    return false;
   }
 }
 
@@ -2316,25 +2423,54 @@ export async function createContactSuppression(suppressionData: {
  */
 export async function getContactSuppression(contactId: string): Promise<{
   id: string;
-  suppressionType: string;
+  contactId: string | null;
+  email: string;
+  suppressionType: SuppressionType;
   suppressionReason: string;
+  sesMessageId: string | null;
   suppressedAt: Date;
 } | null> {
   const [record] = await sql<
     {
       id: string;
-      suppressionType: string;
+      contactId: string | null;
+      email: string;
+      suppressionType: SuppressionType;
       suppressionReason: string;
+      sesMessageId: string | null;
       suppressedAt: Date;
     }[]
   >`
-    SELECT id, suppression_type as "suppressionType", suppression_reason as "suppressionReason",
-           suppressed_at as "suppressedAt"
+    SELECT
+      id,
+      contact_id as "contactId",
+      email,
+      suppression_type as "suppressionType",
+      suppression_reason as "suppressionReason",
+      ses_message_id as "sesMessageId",
+      suppressed_at as "suppressedAt"
     FROM contact_suppressions
     WHERE contact_id = ${contactId}
+    ORDER BY suppressed_at DESC
     LIMIT 1
   `;
-  return record || null;
+
+  if (record) {
+    return record;
+  }
+
+  const [contact] = await sql<{ email: string }[]>`
+    SELECT email
+    FROM contacts
+    WHERE id = ${contactId}
+    LIMIT 1
+  `;
+
+  if (!contact?.email) {
+    return null;
+  }
+
+  return await getContactSuppressionByEmail(contact.email);
 }
 
 /**
@@ -2348,6 +2484,45 @@ export async function isContactSuppressed(contactId: string): Promise<boolean> {
 }
 
 /**
+ * Check if an email is suppressed
+ * @param email - Email address to check
+ * @returns Suppression record or null if email is not suppressed
+ */
+export async function getContactSuppressionByEmail(
+  email: string
+): Promise<ContactSuppression | null> {
+  const validation = validateEmailFormat(email);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Invalid email format');
+  }
+
+  const normalizedEmail = normalizeEmailAddress(email);
+  const [record] = await sql<ContactSuppression[]>`
+    SELECT
+      id,
+      contact_id as "contactId",
+      email,
+      suppression_type as "suppressionType",
+      suppression_reason as "suppressionReason",
+      ses_message_id as "sesMessageId",
+      suppressed_at as "suppressedAt"
+    FROM contact_suppressions
+    WHERE LOWER(email) = ${normalizedEmail}
+    ORDER BY suppressed_at DESC
+    LIMIT 1
+  `;
+  return record ?? null;
+}
+
+/**
+ * Check if an email is currently suppressed
+ */
+export async function isEmailSuppressed(email: string): Promise<boolean> {
+  const suppression = await getContactSuppressionByEmail(email);
+  return suppression !== null;
+}
+
+/**
  * Find send log by SES message ID
  * @param messageId - SES message ID
  * @returns Send log record or null
@@ -2355,6 +2530,7 @@ export async function isContactSuppressed(contactId: string): Promise<boolean> {
 export async function getSendLogByMessageId(messageId: string): Promise<{
   id: string;
   contactId: string;
+  email: string;
   status: string;
   messageId: string;
 } | null> {
@@ -2362,14 +2538,21 @@ export async function getSendLogByMessageId(messageId: string): Promise<{
     {
       id: string;
       contactId: string;
+      email: string;
       status: string;
       messageId: string;
     }[]
   >`
-    SELECT id, contact_id as "contactId", status, message_id as "messageId"
-    FROM send_logs
-    WHERE message_id = ${messageId}
-    ORDER BY created_at DESC
+    SELECT
+      sl.id,
+      sl.contact_id as "contactId",
+      c.email,
+      sl.status,
+      sl.message_id as "messageId"
+    FROM send_logs sl
+    JOIN contacts c ON c.id = sl.contact_id
+    WHERE sl.message_id = ${messageId}
+    ORDER BY sl.created_at DESC
     LIMIT 1
   `;
   return record || null;
@@ -2525,11 +2708,13 @@ export async function updateSendLogComplained(
  */
 export async function suppressContact(
   contactId: string,
+  email: string,
   reason: string,
   eventType: 'bounce' | 'complaint'
 ): Promise<void> {
   await createContactSuppression({
     contactId,
+    email,
     suppressionType: eventType,
     suppressionReason: reason,
   });

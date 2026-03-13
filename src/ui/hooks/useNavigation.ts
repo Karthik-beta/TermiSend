@@ -63,6 +63,9 @@ export function useNavigation(onQuit?: () => void): NavigationState & Navigation
         case 'campaign':
           setCurrentView('CAMPAIGN');
           break;
+        case 'unsubscribe':
+          setCurrentView('UNSUBSCRIBE');
+          break;
         case 'analytics':
           setCurrentView('ANALYTICS');
           break;

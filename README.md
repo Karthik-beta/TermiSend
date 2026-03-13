@@ -304,13 +304,25 @@ TermiSend uses MyEmailVerifier to validate email addresses before sending:
 3. Check available verification credits
 4. Note: Credits are deducted for each verification call
 
+**Bypass Mode:**
+- Set `BYPASS_MYEMAILVERIFIER_API=true` when you intentionally want TermiSend to skip the live API and return simulated responses. This flag works in every environment (including production) and keeps the downstream workflow intact, but you will no longer get real risk scoring or credit tracking while it is enabled. The bypass is the only supported way to avoid reaching MyEmailVerifier from TermiSend—auto-validation in SES (or other AWS controls) does not toggle it.
+
+**Configurable Send Policy:**
+- Set `EMAIL_VERIFICATION_POLICY` to control how strict TermiSend should be when deciding whether to send.
+- Supported values:
+  - `strict`: allow `valid:low`
+  - `balanced`: allow `valid:low`, `catch-all:low`, and `catch-all:medium`
+  - `permissive`: allow `valid:low`, `valid:medium`, `catch-all:low`, `catch-all:medium`, and `role:low`
+- This setting controls send eligibility after TermiSend maps the MyEmailVerifier response into its internal status/risk result. It does not change the verifier API response itself.
+- If the variable is unset, TermiSend uses `balanced`.
+
 **Email Verification Results:**
-- **Valid**: Safe to send (low risk)
+- **Valid**: Mapped as low risk and allowed by default
 - **Invalid**: Will not send (high risk)
-- **Catch-all**: Domain accepts all emails (medium risk)
+- **Catch-all**: Domain accepts all emails and is allowed by default for low/medium risk
 - **Unknown**: Cannot verify (treated as risky)
 - **Disposable**: Temporary email (will not send)
-- **Role**: Role-based email like admin@ (medium risk)
+- **Role**: Role-based email like admin@ (mapped as low risk but blocked by default unless explicitly allowed)
 
 ## Usage
 

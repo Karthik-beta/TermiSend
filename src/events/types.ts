@@ -477,11 +477,12 @@ export interface SESClickRecordedPayload {
 
 /**
  * Payload for CONTACT_SUPPRESSED event
- * Emitted when a contact is suppressed due to bounce/complaint
+ * Emitted when an email is suppressed from future sends
  */
 export interface ContactSuppressedPayload {
-  contactId: string;
-  messageId: string;
+  contactId?: string;
+  email: string;
+  messageId?: string;
   reason: string;
   suppressionType: 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
 }

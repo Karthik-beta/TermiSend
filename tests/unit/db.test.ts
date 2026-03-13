@@ -35,12 +35,17 @@ mock.module('postgres', () => {
 const {
   closeConnection,
   contactExists,
+  createContactSuppression,
+  getContactByEmail,
+  getContactSuppressionByEmail,
   getContacts,
   getEligibleContacts,
   getEligibleContactCount,
+  isEmailSuppressed,
   initializeSchema,
   insertAuditLog,
   insertContact,
+  insertContactSkipDuplicate,
   createSendLog,
   updateSendLog,
   getContactSendLogs,
@@ -147,6 +152,28 @@ describe('Database Module', () => {
       expect(hasEventTypeIndex).toBe(true);
       expect(hasCreatedAtIndex).toBe(true);
     });
+
+    it('should add email-based suppression indexes and backfill queries', async () => {
+      const executedQueries: string[] = [];
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(' '));
+        return Promise.resolve([]);
+      });
+
+      await initializeSchema();
+
+      expect(
+        executedQueries.some((query) => query.includes('ADD COLUMN IF NOT EXISTS email VARCHAR(255)'))
+      ).toBe(true);
+      expect(
+        executedQueries.some((query) =>
+          query.includes('idx_contact_suppressions_email_type_unique')
+        )
+      ).toBe(true);
+      expect(
+        executedQueries.some((query) => query.includes('UPDATE contact_suppressions cs'))
+      ).toBe(true);
+    });
   });
 
   // ============================================================================
@@ -222,6 +249,31 @@ describe('Database Module', () => {
 
       expect(result.companyName).toBe("O'Reilly & Associates");
       expect(result.personName).toBe('Jean-Pierre François');
+    });
+
+    it('should normalize the email and link existing suppressions after insert', async () => {
+      const executedQueries: string[] = [];
+      const dbRow = {
+        id: 'contact-1',
+        email: 'user@example.com',
+        companyName: 'Test Company',
+        personName: 'John Doe',
+        createdAt: new Date(),
+      };
+
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(' '));
+        if (executedQueries.length === 1) {
+          return Promise.resolve([dbRow]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const result = await insertContact('Test Company', 'John Doe', '  USER@Example.com ');
+
+      expect(result.email).toBe('user@example.com');
+      expect(executedQueries[0]).toContain('INSERT INTO contacts');
+      expect(executedQueries[1]).toContain('UPDATE contact_suppressions');
     });
   });
 
@@ -308,6 +360,22 @@ describe('Database Module', () => {
       mockSqlFn.mockImplementation(() => Promise.reject(dbError));
       await expect(getEligibleContacts()).rejects.toThrow('Connection timeout');
     });
+
+    it('should exclude contacts using email-based suppressions', async () => {
+      const executedQueries: string[] = [];
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(' '));
+        return Promise.resolve([]);
+      });
+
+      await getEligibleContacts();
+
+      expect(
+        executedQueries.some((query) =>
+          query.includes('LOWER(cs.email) = LOWER(c.email)')
+        )
+      ).toBe(true);
+    });
   });
 
   // ============================================================================
@@ -331,6 +399,22 @@ describe('Database Module', () => {
       const dbError = new Error('Query failed');
       mockSqlFn.mockImplementation(() => Promise.reject(dbError));
       await expect(getEligibleContactCount()).rejects.toThrow('Query failed');
+    });
+
+    it('should exclude email-based suppressions in count queries', async () => {
+      const executedQueries: string[] = [];
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(' '));
+        return Promise.resolve([{ count: 0 }]);
+      });
+
+      await getEligibleContactCount();
+
+      expect(
+        executedQueries.some((query) =>
+          query.includes('LOWER(cs.email) = LOWER(c.email)')
+        )
+      ).toBe(true);
     });
   });
 
@@ -463,6 +547,139 @@ describe('Database Module', () => {
       const dbRow = { exists: true };
       mockSqlFn.mockImplementation(() => Promise.resolve([dbRow]));
       const result = await contactExists('Test.User@Example.COM');
+      expect(result).toBe(true);
+    });
+  });
+
+  describe('getContactByEmail()', () => {
+    it('should normalize email lookups', async () => {
+      const capturedValues: unknown[][] = [];
+      const contact = createMockContact({ email: 'person@example.com' });
+
+      mockSqlFn.mockImplementation((_strings: TemplateStringsArray, ...values: unknown[]) => {
+        capturedValues.push(values);
+        return Promise.resolve([contact]);
+      });
+
+      const result = await getContactByEmail('  PERSON@Example.com ');
+
+      expect(result?.email).toBe('person@example.com');
+      expect(capturedValues[0][0]).toBe('person@example.com');
+    });
+  });
+
+  describe('createContactSuppression()', () => {
+    it('should create suppression records without a contact ID', async () => {
+      mockSqlFn.mockImplementation(() => Promise.resolve([{ id: 'suppression-1' }]));
+
+      const created = await createContactSuppression({
+        email: 'blocked@example.com',
+        suppressionType: 'unsubscribe',
+        suppressionReason: 'Manual unsubscribe',
+      });
+
+      expect(created).toBe(true);
+    });
+
+    it('should normalize email before inserting a suppression', async () => {
+      const capturedValues: unknown[][] = [];
+      mockSqlFn.mockImplementation((_strings: TemplateStringsArray, ...values: unknown[]) => {
+        capturedValues.push(values);
+        return Promise.resolve([{ id: 'suppression-1' }]);
+      });
+
+      await createContactSuppression({
+        email: '  USER@Example.COM ',
+        suppressionType: 'unsubscribe',
+        suppressionReason: 'Manual unsubscribe',
+      });
+
+      expect(capturedValues[0][1]).toBe('user@example.com');
+    });
+
+    it('should return false when suppression already exists', async () => {
+      mockSqlFn.mockImplementation(() => Promise.resolve([]));
+
+      const created = await createContactSuppression({
+        email: 'existing@example.com',
+        suppressionType: 'unsubscribe',
+        suppressionReason: 'Manual unsubscribe',
+      });
+
+      expect(created).toBe(false);
+    });
+  });
+
+  describe('insertContactSkipDuplicate()', () => {
+    it('should link email-only suppressions after a new import insert', async () => {
+      const executedQueries: string[] = [];
+      const dbRow = {
+        id: 'contact-2',
+        email: 'imported@example.com',
+        companyName: 'Imported Co',
+        personName: 'Import User',
+        createdAt: new Date(),
+      };
+
+      mockSqlFn.mockImplementation((strings: TemplateStringsArray) => {
+        executedQueries.push(strings.join(' '));
+        if (executedQueries.length === 1) {
+          return Promise.resolve([dbRow]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const result = await insertContactSkipDuplicate(
+        'Imported Co',
+        'Import User',
+        'IMPORTED@EXAMPLE.COM'
+      );
+
+      expect(result?.email).toBe('imported@example.com');
+      expect(executedQueries[1]).toContain('UPDATE contact_suppressions');
+    });
+  });
+
+  describe('getContactSuppressionByEmail()', () => {
+    it('should return suppression records by email', async () => {
+      mockSqlFn.mockImplementation(() =>
+        Promise.resolve([
+          {
+            id: 'suppression-1',
+            contactId: null,
+            email: 'blocked@example.com',
+            suppressionType: 'unsubscribe',
+            suppressionReason: 'Manual unsubscribe',
+            sesMessageId: null,
+            suppressedAt: new Date(),
+          },
+        ])
+      );
+
+      const result = await getContactSuppressionByEmail('BLOCKED@example.com');
+
+      expect(result?.email).toBe('blocked@example.com');
+      expect(result?.suppressionType).toBe('unsubscribe');
+    });
+  });
+
+  describe('isEmailSuppressed()', () => {
+    it('should return true when an email is suppressed', async () => {
+      mockSqlFn.mockImplementation(() =>
+        Promise.resolve([
+          {
+            id: 'suppression-1',
+            contactId: null,
+            email: 'blocked@example.com',
+            suppressionType: 'unsubscribe',
+            suppressionReason: 'Manual unsubscribe',
+            sesMessageId: null,
+            suppressedAt: new Date(),
+          },
+        ])
+      );
+
+      const result = await isEmailSuppressed('blocked@example.com');
       expect(result).toBe(true);
     });
   });

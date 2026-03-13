@@ -7,7 +7,13 @@
  * Extension: Add new view types, menu items, or UI state as features expand
  */
 
-import type { CampaignResult, Contact, ImportResult, SendStatus } from '../types.js';
+import type {
+  CampaignResult,
+  Contact,
+  ImportResult,
+  SendStatus,
+  UnsubscribeResult,
+} from '../types.js';
 
 // ============================================================================
 // Navigation Types
@@ -16,7 +22,13 @@ import type { CampaignResult, Contact, ImportResult, SendStatus } from '../types
 /**
  * Available dashboard views
  */
-export type DashboardView = 'MENU' | 'IMPORT' | 'CAMPAIGN' | 'RESULTS' | 'ANALYTICS';
+export type DashboardView =
+  | 'MENU'
+  | 'IMPORT'
+  | 'CAMPAIGN'
+  | 'RESULTS'
+  | 'ANALYTICS'
+  | 'UNSUBSCRIBE';
 
 /**
  * Navigation menu item
@@ -35,6 +47,7 @@ export interface MenuItem {
 
 export type ImportStatus = 'idle' | 'loading' | 'success' | 'error';
 export type TemplateStatus = 'idle' | 'downloading' | 'success' | 'error';
+export type UnsubscribeStatus = 'idle' | 'loading' | 'success' | 'error';
 
 /**
  * Import operation state
@@ -52,6 +65,16 @@ export interface ImportState {
 export interface TemplateState {
   status: TemplateStatus;
   filePath: string | null;
+  error: string | null;
+}
+
+/**
+ * Manual unsubscribe state
+ */
+export interface UnsubscribeState {
+  status: UnsubscribeStatus;
+  email: string;
+  result: UnsubscribeResult | null;
   error: string | null;
 }
 

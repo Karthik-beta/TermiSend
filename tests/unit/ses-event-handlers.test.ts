@@ -22,6 +22,7 @@ import {
   handleBounceEvent,
   handleComplaintEvent,
   handleDeliveryEvent,
+  handleDeliveryDelayEvent,
   handleOpenEvent,
   handleClickEvent,
   handleSendEvent,
@@ -31,19 +32,29 @@ import {
   createSoftBounceEventRecord,
   createComplaintEventRecord,
   createDeliveryEventRecord,
+  createDeliveryDelayEventRecord,
   createOpenEventRecord,
   createClickEventRecord,
   createSendEventRecord,
   createRejectEventRecord,
   createRenderingFailureEventRecord,
 } from '../fixtures/ses-events.js';
-import type { ParsedSESEvent, SESBounceData, SESComplaintData, SESDeliveryData, SESOpenData, SESClickData } from '../../src/types.js';
+import type {
+  ParsedSESEvent,
+  SESBounceData,
+  SESClickData,
+  SESComplaintData,
+  SESDeliveryData,
+  SESDeliveryDelayData,
+  SESOpenData,
+} from '../../src/types.js';
 
 describe('SES Event Handlers Module', () => {
   // Mock data
   const mockSendLog = {
     id: 'send-log-id-123',
     contactId: 'contact-id-123',
+    email: 'recipient@example.com',
     status: 'sent',
     messageId: 'ses-message-id-12345',
   };
@@ -97,6 +108,19 @@ describe('SES Event Handlers Module', () => {
       expect(result.updatedSendLogIds).toContain(mockSendLog.id);
     });
 
+    it('should enrich event tracking with resolved send-log linkage', async () => {
+      const event = createParsedBounceEvent('Permanent');
+      await processSESEvent(event);
+
+      expect(dbModule.createSESEventTracking).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contactId: mockSendLog.contactId,
+          sendLogId: mockSendLog.id,
+          sesMessageId: event.messageId,
+        })
+      );
+    });
+
     it('should route complaint events to handleComplaintEvent', async () => {
       const event = createParsedComplaintEvent();
       const result = await processSESEvent(event);
@@ -113,6 +137,20 @@ describe('SES Event Handlers Module', () => {
       expect(result.success).toBe(true);
       expect(dbModule.createSESEventTracking).toHaveBeenCalled();
       expect(result.updatedSendLogIds).toContain(mockSendLog.id);
+    });
+
+    it('should handle delivery delay events without failing the consumer', async () => {
+      const event = createParsedDeliveryDelayEvent();
+      const result = await processSESEvent(event);
+
+      expect(result.success).toBe(true);
+      expect(dbModule.createSESEventTracking).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: 'DeliveryDelay',
+          sendLogId: mockSendLog.id,
+        })
+      );
+      expect(dbModule.getSendLogByMessageId).toHaveBeenCalledWith(event.messageId);
     });
 
     it('should route open events to handleOpenEvent', async () => {
@@ -164,6 +202,50 @@ describe('SES Event Handlers Module', () => {
       // Event emission is done via domainEvents.emit
       // Since we can't easily spy on that, we verify the function completed
       expect(dbModule.createSESEventTracking).toHaveBeenCalled();
+    });
+
+    it('should still track events when send log linkage is unavailable', async () => {
+      spyOn(dbModule, 'getSendLogByMessageId').mockResolvedValue(null);
+
+      const event = createParsedDeliveryEvent();
+      const result = await processSESEvent(event);
+
+      expect(result.success).toBe(true);
+      expect(dbModule.createSESEventTracking).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contactId: undefined,
+          sendLogId: undefined,
+        })
+      );
+    });
+
+    it('should store truncated SES essentials when raw event payload is too large', async () => {
+      const oversizedHeader = 'x'.repeat(120000);
+      const event = createParsedBounceEvent('Permanent');
+      event.rawEvent = {
+        ...event.rawEvent,
+        mail: {
+          ...event.rawEvent.mail,
+          headers: [{ name: 'X-Oversized', value: oversizedHeader }],
+        },
+      };
+
+      await processSESEvent(event);
+
+      expect(dbModule.createSESEventTracking).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventData: expect.objectContaining({
+            eventType: event.eventType,
+            eventTime: event.rawEvent.eventTime,
+            mail: expect.objectContaining({
+              messageId: event.rawEvent.mail.messageId,
+              source: event.rawEvent.mail.source,
+              destination: event.rawEvent.mail.destination,
+            }),
+            truncated: true,
+          }),
+        })
+      );
     });
 
     it('should return error for unsupported event types', async () => {
@@ -223,6 +305,7 @@ describe('SES Event Handlers Module', () => {
       expect(result.affectedContactIds).toContain(mockSendLog.contactId);
       expect(dbModule.suppressContact).toHaveBeenCalledWith(
         mockSendLog.contactId,
+        mockSendLog.email,
         expect.stringContaining('Hard bounce'),
         'bounce'
       );
@@ -268,6 +351,8 @@ describe('SES Event Handlers Module', () => {
         expect.objectContaining({
           type: 'contact:suppressed',
           contactId: mockSendLog.contactId,
+          email: mockSendLog.email,
+          suppressionType: 'bounce',
         })
       );
     });
@@ -307,6 +392,7 @@ describe('SES Event Handlers Module', () => {
       expect(result.affectedContactIds).toContain(mockSendLog.contactId);
       expect(dbModule.suppressContact).toHaveBeenCalledWith(
         mockSendLog.contactId,
+        mockSendLog.email,
         expect.stringContaining('Complaint'),
         'complaint'
       );
@@ -331,6 +417,8 @@ describe('SES Event Handlers Module', () => {
         expect.objectContaining({
           type: 'contact:suppressed',
           contactId: mockSendLog.contactId,
+          email: mockSendLog.email,
+          suppressionType: 'complaint',
         })
       );
       expect(eventsBusModule.emitAnalyticsEvent).toHaveBeenCalledWith(
@@ -398,6 +486,20 @@ describe('SES Event Handlers Module', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
+    });
+  });
+
+  describe('handleDeliveryDelayEvent()', () => {
+    it('should succeed without mutating send status', async () => {
+      const event = createParsedDeliveryDelayEvent();
+
+      const result = await handleDeliveryDelayEvent(event);
+
+      expect(result.success).toBe(true);
+      expect(result.updatedSendLogIds).toEqual([]);
+      expect(dbModule.getSendLogByMessageId).toHaveBeenCalledWith(event.messageId);
+      expect(dbModule.confirmSendLogDelivery).not.toHaveBeenCalled();
+      expect(dbModule.updateSendLogBounced).not.toHaveBeenCalled();
     });
   });
 
@@ -615,6 +717,21 @@ describe('SES Event Handlers Module', () => {
       recipients: record.delivery?.recipients || [],
       source: record.mail.source,
       data: record.delivery as SESDeliveryData,
+      rawEvent: record,
+    };
+  }
+
+  function createParsedDeliveryDelayEvent(): ParsedSESEvent & { data: SESDeliveryDelayData } {
+    const record = createDeliveryDelayEventRecord();
+    return {
+      eventId: 'event-id-123',
+      eventType: 'DeliveryDelay',
+      timestamp: new Date(),
+      messageId: record.mail.messageId,
+      recipients:
+        record.deliveryDelay?.delayedRecipients.map((recipient) => recipient.emailAddress) || [],
+      source: record.mail.source,
+      data: record.deliveryDelay as SESDeliveryDelayData,
       rawEvent: record,
     };
   }

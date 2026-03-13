@@ -1112,29 +1112,6 @@ async function processContact(
         status: 'failed',
         message: `Failed to send to ${contact.email}: ${sendResult.error || 'Unknown error'}${retryAttempt > 0 ? ` (after ${retryAttempt} retries)` : ''}`,
       });
-
-      // CRITICAL FIX: Apply throttle AFTER failed send to control rate to NEXT email
-      await reportProgress(onProgress, {
-        currentContact: current,
-        totalContacts: total,
-        email: contact.email,
-        status: 'waiting',
-        message: 'Waiting before next send...',
-      });
-
-      await throttleController.waitBeforeSend((remainingMs, totalMs) => {
-        reportProgress(onProgress, {
-          currentContact: current,
-          totalContacts: total,
-          email: contact.email,
-          status: 'waiting',
-          waitTimeRemainingMs: remainingMs,
-          totalWaitTimeMs: totalMs,
-          message: `Waiting ${Math.ceil(remainingMs / 1000)}s before next send...`,
-        }).catch(() => {
-          // Silently ignore progress callback errors
-        });
-      });
       return;
     }
   }

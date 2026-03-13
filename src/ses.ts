@@ -7,6 +7,7 @@ import {
   type SESClient,
   SendRawEmailCommand,
   type SendRawEmailCommandInput,
+  DescribeConfigurationSetCommand,
 } from '@aws-sdk/client-ses';
 import {
   getAnalyticsConfig,
@@ -41,6 +42,13 @@ const RETRY_BASE_DELAY_MS = 1000;
 /** Maximum delay for exponential backoff (ms) - 10 seconds */
 const MAX_BACKOFF_DELAY_MS = 10000;
 let hasWarnedMissingAnalyticsConfigSet = false;
+
+let cachedConfigurationSetCheck:
+  | {
+      name: string;
+      exists: boolean;
+    }
+  | null = null;
 
 // Test-only variable for client override
 let testClientOverride: SESClient | null = null;
@@ -184,9 +192,42 @@ function buildRawMimeMessage(params: EmailSendParams, fromEmail: string): string
 /**
  * Construct the input for SendRawEmailCommand
  */
+async function ensureConfigurationSetExists(
+  sesClient: SESClient,
+  configurationSetName: string
+): Promise<boolean> {
+  if (cachedConfigurationSetCheck?.name === configurationSetName) {
+    return cachedConfigurationSetCheck.exists;
+  }
+
+  try {
+    await sesClient.send(
+      new DescribeConfigurationSetCommand({
+        ConfigurationSetName: configurationSetName,
+      })
+    );
+    cachedConfigurationSetCheck = {
+      name: configurationSetName,
+      exists: true,
+    };
+    return true;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    cachedConfigurationSetCheck = {
+      name: configurationSetName,
+      exists: false,
+    };
+    await logger.warn(
+      `SES configuration set "${configurationSetName}" is missing or misconfigured: ${errorMessage}`
+    );
+    return false;
+  }
+}
+
 function constructSendRawEmailInput(
   params: EmailSendParams,
-  fromEmail: string
+  fromEmail: string,
+  configurationSetName?: string
 ): SendRawEmailCommandInput {
   const rawMessage = buildRawMimeMessage(params, fromEmail);
   const input: SendRawEmailCommandInput = {
@@ -195,7 +236,6 @@ function constructSendRawEmailInput(
     },
   };
 
-  const configurationSetName = getSESConfigurationSetName();
   if (configurationSetName) {
     input.ConfigurationSetName = configurationSetName;
   }
@@ -316,7 +356,7 @@ async function sendWithRetry(
 /**
  * Send an email via AWS SES with retries and throttling
  */
-export function sendEmail(
+export async function sendEmail(
   params: EmailSendParams,
   controller: EmailThrottleController = getEmailThrottleController(),
   providedSesClient?: SESClient
@@ -325,15 +365,26 @@ export function sendEmail(
   const sesFromEmail = getSESFromEmail();
 
   if (!sesFromEmail) {
-    return Promise.resolve({ success: false, error: 'SES_FROM_EMAIL not configured' });
+    return { success: false, error: 'SES_FROM_EMAIL not configured' };
   }
   if (!params.to || !params.subject) {
-    return Promise.resolve({ success: false, error: 'Missing parameters' });
+    return { success: false, error: 'Missing parameters' };
+  }
+
+  const configurationSetName = getSESConfigurationSetName();
+
+  if (configurationSetName) {
+    const configSetReady = await ensureConfigurationSetExists(sesClient, configurationSetName);
+    if (!configSetReady) {
+      const error = `SES configuration set ${configurationSetName} does not exist`;
+      await logger.logError('AWS SES Send', error, { to: params.to, attempt: 0 }).catch(() => {});
+      return { success: false, error };
+    }
   }
 
   if (
     getAnalyticsConfig().enabled &&
-    !getSESConfigurationSetName() &&
+    !configurationSetName &&
     !hasWarnedMissingAnalyticsConfigSet
   ) {
     hasWarnedMissingAnalyticsConfigSet = true;
@@ -355,10 +406,10 @@ export function sendEmail(
       finalTo = getTestRecipientEmail();
       finalSubject = params.subject;
     } catch (error) {
-      return Promise.resolve({
+      return {
         success: false,
         error: error instanceof Error ? error.message : 'Redirection error',
-      });
+      };
     }
   }
 
@@ -368,7 +419,8 @@ export function sendEmail(
       to: finalTo,
       subject: finalSubject,
     },
-    sesFromEmail
+    sesFromEmail,
+    configurationSetName
   );
   return sendWithRetry(sesClient, sendEmailInput, params, controller);
 }

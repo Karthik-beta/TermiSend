@@ -206,6 +206,7 @@ describe('Campaign Integration Tests - Rate Limiter', () => {
 
       // Both should have failed
       expect(result.failedCount).toBe(2);
+      expect(waitBeforeSendSpy).not.toHaveBeenCalled();
     });
 
     it('should process multiple contacts', async () => {

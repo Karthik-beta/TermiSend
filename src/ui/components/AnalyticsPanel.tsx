@@ -9,7 +9,7 @@
 /** @jsxImportSource react */
 import { Box, Text } from 'ink';
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getAnalyticsCounts } from '../../db.js';
 import { type AnalyticsEvent, eventBus } from '../../events/bus.js';
 import { colors, icons } from '../theme.js';
@@ -60,31 +60,32 @@ export function AnalyticsPanel(): React.ReactElement {
     complained: 0,
   });
 
+  const refreshStats = useCallback(async () => {
+    try {
+      const result = await getAnalyticsCounts();
+      setStats((prev) => ({ ...prev, ...result }));
+    } catch {
+      // Silently ignore — will update on next event
+    }
+  }, []);
+
   // Initial fetch from database
   useEffect(() => {
-    let mounted = true;
-
-    async function fetchStats() {
-      try {
-        const result = await getAnalyticsCounts();
-        if (!mounted) {
-          return;
-        }
-        setStats((prev) => ({ ...prev, ...result }));
-      } catch {
-        // Silently ignore — will update on next event
-      }
-    }
-    fetchStats();
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    refreshStats().catch(() => {
+      // Silently ignore — will update on next event
+    });
+  }, [refreshStats]);
 
   // Subscribe to event bus for real-time updates
   useEffect(() => {
     const handleEvent = (event: AnalyticsEvent) => {
+      if (event.type === 'contact:suppressed') {
+        refreshStats().catch(() => {
+          // Ignore refresh errors; the next event/poll will recover
+        });
+        return;
+      }
+
       setStats((prev) => {
         const next = { ...prev };
         switch (event.type) {
@@ -126,7 +127,7 @@ export function AnalyticsPanel(): React.ReactElement {
     return () => {
       eventBus.off('analytics', handleEvent);
     };
-  }, []);
+  }, [refreshStats]);
 
   return (
     <Box

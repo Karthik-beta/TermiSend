@@ -8,6 +8,7 @@ import {
   parseSNSNotification,
   parseSESEventRecord,
   parseSESEvent,
+  parseSESEventMessage,
   isSupportedEventType,
   extractRecipients,
   extractMessageIdFromSNS,
@@ -23,6 +24,7 @@ import {
   createSoftBounceNotification,
   createComplaintNotification,
   createDeliveryNotification,
+  createDeliveryDelayNotification,
   createOpenNotification,
   createClickNotification,
   createSendNotification,
@@ -32,10 +34,13 @@ import {
   createInvalidSESEventNotification,
   createMalformedJSONNotification,
   createNonSNSNotification,
+  createRawSESEventMessage,
+  createSubscriptionConfirmationNotification,
   createHardBounceEventRecord,
   createSoftBounceEventRecord,
   createComplaintEventRecord,
   createDeliveryEventRecord,
+  createDeliveryDelayEventRecord,
   createOpenEventRecord,
   createClickEventRecord,
   createSendEventRecord,
@@ -186,6 +191,15 @@ describe('SES Events Module', () => {
       expect(result?.delivery).toBeDefined();
     });
 
+    it('should parse valid delivery delay event record', () => {
+      const record = createDeliveryDelayEventRecord();
+      const result = parseSESEventRecord(JSON.stringify(record));
+
+      expect(result).not.toBeNull();
+      expect(result?.eventType).toBe('DeliveryDelay');
+      expect(result?.deliveryDelay).toBeDefined();
+    });
+
     it('should parse valid open event record', () => {
       const record = createOpenEventRecord();
       const result = parseSESEventRecord(JSON.stringify(record));
@@ -246,11 +260,23 @@ describe('SES Events Module', () => {
       expect(result).toBeNull();
     });
 
-    it('should return null when missing required eventTime field', () => {
+    it('should derive eventTime from event payload when missing top-level eventTime', () => {
+      const invalidRecord = {
+        ...createDeliveryEventRecord(),
+        eventTime: undefined,
+      };
+      const result = parseSESEventRecord(JSON.stringify(invalidRecord));
+      expect(result).not.toBeNull();
+      expect(result?.eventTime).toBe(invalidRecord.delivery.timestamp);
+    });
+
+    it('should return null when missing all event timestamps', () => {
       const invalidRecord = {
         eventType: 'Bounce',
-        // Missing eventTime
-        mail: createHardBounceEventRecord().mail,
+        mail: {
+          ...createHardBounceEventRecord().mail,
+          timestamp: undefined,
+        },
       };
       const result = parseSESEventRecord(JSON.stringify(invalidRecord));
       expect(result).toBeNull();
@@ -333,6 +359,16 @@ describe('SES Events Module', () => {
       expect(result?.data).toHaveProperty('processingTimeMillis');
     });
 
+    it('should parse complete delivery delay event', () => {
+      const message = createDeliveryDelayNotification();
+      const result = parseSESEvent(message);
+
+      expect(result).not.toBeNull();
+      expect(result?.eventType).toBe('DeliveryDelay');
+      expect(result?.recipients).toContain('recipient@example.com');
+      expect(result?.data).toHaveProperty('delayType', 'TransientCommunicationFailure');
+    });
+
     it('should parse complete open event', () => {
       const message = createOpenNotification();
       const result = parseSESEvent(message);
@@ -379,6 +415,16 @@ describe('SES Events Module', () => {
       expect(result?.data).toHaveProperty('errorMessage');
     });
 
+    it('should parse raw SES event bodies from SQS', () => {
+      const message = createRawSESEventMessage(createDeliveryEventRecord());
+      const result = parseSESEvent(message);
+
+      expect(result).not.toBeNull();
+      expect(result?.eventType).toBe('Delivery');
+      expect(result?.messageId).toBe('delivery-message-id-12345');
+      expect(result?.eventId).toBe('delivery-message-id-12345');
+    });
+
     it('should return null for invalid SNS notification', () => {
       const result = parseSESEvent(createInvalidSNSNotification());
       expect(result).toBeNull();
@@ -392,6 +438,28 @@ describe('SES Events Module', () => {
     it('should return null for malformed JSON', () => {
       const result = parseSESEvent(createMalformedJSONNotification());
       expect(result).toBeNull();
+    });
+  });
+
+  describe('parseSESEventMessage()', () => {
+    it('should classify SNS subscription confirmations as skips', () => {
+      const result = parseSESEventMessage(createSubscriptionConfirmationNotification());
+
+      expect(result.kind).toBe('skip');
+      if (result.kind !== 'skip') {
+        throw new Error('Expected skip result');
+      }
+      expect(result.reason).toContain('SubscriptionConfirmation');
+    });
+
+    it('should classify malformed payloads as invalid', () => {
+      const result = parseSESEventMessage(createMalformedJSONNotification());
+
+      expect(result.kind).toBe('invalid');
+      if (result.kind !== 'invalid') {
+        throw new Error('Expected invalid result');
+      }
+      expect(result.reason).toBeDefined();
     });
   });
 
@@ -410,6 +478,10 @@ describe('SES Events Module', () => {
 
     it('should return true for Delivery', () => {
       expect(isSupportedEventType('Delivery')).toBe(true);
+    });
+
+    it('should return true for DeliveryDelay', () => {
+      expect(isSupportedEventType('DeliveryDelay')).toBe(true);
     });
 
     it('should return true for Open', () => {
@@ -461,6 +533,13 @@ describe('SES Events Module', () => {
 
     it('should extract recipients from delivery recipients', () => {
       const record = createDeliveryEventRecord();
+      const result = extractRecipients(record);
+
+      expect(result).toContain('recipient@example.com');
+    });
+
+    it('should extract recipients from delayed delivery recipients', () => {
+      const record = createDeliveryDelayEventRecord();
       const result = extractRecipients(record);
 
       expect(result).toContain('recipient@example.com');

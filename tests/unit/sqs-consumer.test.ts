@@ -33,6 +33,7 @@ import {
 import {
   createHardBounceNotification,
   createDeliveryNotification,
+  createSubscriptionConfirmationNotification,
 } from '../fixtures/ses-events.js';
 import { restoreEnv, setMockEnv } from '../helpers/test-utils.js';
 
@@ -217,21 +218,24 @@ describe('SQS Consumer Module', () => {
   describe('processMessage()', () => {
     beforeEach(() => {
       // Mock SES event parsing
-      spyOn(sesEventsModule, 'parseSESEvent').mockImplementation(() => ({
-        eventId: 'event-id-123',
-        eventType: 'Bounce',
-        timestamp: new Date(),
-        messageId: 'ses-message-id-12345',
-        recipients: ['recipient@example.com'],
-        source: 'sender@example.com',
-        data: {
-          bounceType: 'Permanent',
-          bounceSubType: 'General',
-          bouncedRecipients: [{ emailAddress: 'recipient@example.com' }],
-          timestamp: new Date().toISOString(),
-          feedbackId: 'feedback-123',
+      spyOn(sesEventsModule, 'parseSESEventMessage').mockImplementation(() => ({
+        kind: 'event',
+        event: {
+          eventId: 'event-id-123',
+          eventType: 'Bounce',
+          timestamp: new Date(),
+          messageId: 'ses-message-id-12345',
+          recipients: ['recipient@example.com'],
+          source: 'sender@example.com',
+          data: {
+            bounceType: 'Permanent',
+            bounceSubType: 'General',
+            bouncedRecipients: [{ emailAddress: 'recipient@example.com' }],
+            timestamp: new Date().toISOString(),
+            feedbackId: 'feedback-123',
+          },
+          rawEvent: {} as import('../../src/types.js').SESEventRecord,
         },
-        rawEvent: {} as import('../../src/types.js').SESEventRecord,
       }));
 
       // Mock event handler
@@ -254,7 +258,7 @@ describe('SQS Consumer Module', () => {
       const result = await processMessage(message);
 
       expect(result.success).toBe(true);
-      expect(sesEventsModule.parseSESEvent).toHaveBeenCalledWith(message.body);
+      expect(sesEventsModule.parseSESEventMessage).toHaveBeenCalledWith(message.body);
       expect(sesEventHandlersModule.processSESEvent).toHaveBeenCalled();
     });
 
@@ -272,7 +276,10 @@ describe('SQS Consumer Module', () => {
     });
 
     it('should fail when SES event parsing fails', async () => {
-      spyOn(sesEventsModule, 'parseSESEvent').mockReturnValue(null);
+      spyOn(sesEventsModule, 'parseSESEventMessage').mockReturnValue({
+        kind: 'invalid',
+        reason: 'Failed to parse SES event from message body',
+      });
 
       const message = {
         messageId: 'sqs-msg-1',
@@ -283,7 +290,25 @@ describe('SQS Consumer Module', () => {
       const result = await processMessage(message);
 
       expect(result.success).toBe(false);
+      expect(result.nonRetryable).toBe(true);
       expect(result.error).toContain('Failed to parse SES event');
+    });
+
+    it('should classify SNS subscription confirmations as non-retryable', async () => {
+      spyOn(sesEventsModule, 'parseSESEventMessage').mockReturnValue({
+        kind: 'skip',
+        reason: 'Skipping SNS SubscriptionConfirmation message',
+      });
+
+      const result = await processMessage({
+        messageId: 'sqs-msg-2',
+        receiptHandle: 'receipt-2',
+        body: createSubscriptionConfirmationNotification(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.nonRetryable).toBe(true);
+      expect(result.error).toContain('SubscriptionConfirmation');
     });
 
     it('should pass through event processing errors', async () => {
@@ -403,6 +428,37 @@ describe('SQS Consumer Module', () => {
 
       // Should call DeleteMessage
       expect(mockSend).toHaveBeenCalled();
+    });
+
+    it('should honor configured maxReceiveCount', async () => {
+      spyOn(configModule, 'getSQSConfig').mockReturnValue({
+        queueUrl: 'https://sqs.us-east-1.amazonaws.com/123456789/termisend-queue',
+        region: 'us-east-1',
+        credentials: {
+          accessKeyId: 'test',
+          secretAccessKey: 'test',
+        },
+        pollingIntervalMs: 10000,
+        maxMessagesPerPoll: 10,
+        visibilityTimeoutSeconds: 300,
+        waitTimeSeconds: 20,
+        maxReceiveCount: 5,
+        autoDelete: true,
+        debugLogging: false,
+      });
+
+      await handleProcessingError(
+        {
+          messageId: 'sqs-msg-1',
+          receiptHandle: 'receipt-1',
+          body: createHardBounceNotification(),
+          receiveCount: 4,
+        },
+        new Error('Processing failed'),
+        4
+      );
+
+      expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
     it('should not delete message when autoDelete is false', async () => {

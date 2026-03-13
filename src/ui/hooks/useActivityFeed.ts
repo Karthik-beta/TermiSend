@@ -77,7 +77,12 @@ function mapAnalyticsEventToActivity(event: AnalyticsEvent): ActivityEvent | nul
     case 'email:clicked':
       return createActivityEvent('ses', 'Link clicked', 'info', now);
     case 'contact:suppressed':
-      return createActivityEvent('system', `Contact suppressed (${event.reason})`, 'warning', now);
+      return createActivityEvent(
+        'system',
+        `Suppressed ${event.email} (${event.reason})`,
+        'warning',
+        now
+      );
     case 'contact:updated':
       return createActivityEvent('system', `Contact status updated: ${event.status}`, 'info', now);
     case 'verifier:credits_updated':

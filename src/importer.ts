@@ -259,8 +259,9 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     const workbook = new ExcelJs.Workbook();
     await workbook.xlsx.readFile(sanitizedPath);
 
-    // Get the first worksheet
-    const worksheet = workbook.getWorksheet(1);
+    // Use the first actual worksheet rather than worksheet ID 1.
+    // Some valid workbooks can have a first visible sheet with a non-sequential ID.
+    const worksheet = workbook.worksheets[0];
     if (!worksheet) {
       throw new Error('No worksheet found in Excel file');
     }

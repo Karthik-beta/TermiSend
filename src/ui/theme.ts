@@ -130,6 +130,7 @@ export const icons = {
   import: '>>',
   campaign: '>>',
   analytics: '>>',
+  unsubscribe: '>>',
   quit: '×',
   back: '<-',
 

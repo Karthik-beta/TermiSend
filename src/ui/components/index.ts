@@ -19,3 +19,4 @@ export { LogOutput } from './LogOutput.js';
 export { Menu, menuItems } from './Menu.js';
 export { CompactPanel, Panel } from './Panel.js';
 export { StatusBar } from './StatusBar.js';
+export { UnsubscribeForm } from './UnsubscribeForm.js';

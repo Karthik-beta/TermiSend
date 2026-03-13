@@ -31,6 +31,7 @@ import { Header } from './Header.js';
 import { ImportForm } from './ImportForm.js';
 import { Menu } from './Menu.js';
 import { StatusBar } from './StatusBar.js';
+import { UnsubscribeForm } from './UnsubscribeForm.js';
 
 /**
  * Main dashboard layout component
@@ -150,6 +151,9 @@ export function Dashboard(): React.ReactElement {
       if (input === 'c' || input === 'C') {
         navigateTo('CAMPAIGN');
       }
+      if (input === 'u' || input === 'U') {
+        navigateTo('UNSUBSCRIBE');
+      }
     }
 
     // Escape to go back (always allowed so analytics/menu stay reachable)
@@ -165,6 +169,15 @@ export function Dashboard(): React.ReactElement {
     });
   }, [refreshContacts]);
 
+  const handleUnsubscribeComplete = useCallback(() => {
+    refreshContacts().catch(() => {
+      // Error handled by hook
+    });
+    campaign.loadPendingCount().catch(() => {
+      // Error handled by hook
+    });
+  }, [campaign, refreshContacts]);
+
   // Render main content based on current view
   const renderMainContent = useMemo(() => {
     return (view: DashboardView): React.ReactElement => {
@@ -173,13 +186,15 @@ export function Dashboard(): React.ReactElement {
           return <ImportForm onImportComplete={handleImportComplete} />;
         case 'CAMPAIGN':
           return <CampaignForm onCampaignComplete={goToMenu} campaign={campaign} />;
+        case 'UNSUBSCRIBE':
+          return <UnsubscribeForm onUnsubscribeComplete={handleUnsubscribeComplete} />;
         case 'ANALYTICS':
           return <AnalyticsView />;
         default:
           return <Menu onSelect={handleMenuSelect} />;
       }
     };
-  }, [handleImportComplete, goToMenu, handleMenuSelect, campaign]);
+  }, [campaign, goToMenu, handleImportComplete, handleMenuSelect, handleUnsubscribeComplete]);
 
   return (
     <Box flexDirection="column" height={terminalHeight}>

@@ -82,6 +82,20 @@ export function resetEnvCacheForTesting(): void {
 
 import type { ThrottleConfig } from './types';
 
+const EMAIL_VERIFICATION_POLICY_ALLOWED_OUTCOMES = Object.freeze({
+  strict: ['valid:low'],
+  balanced: ['valid:low', 'catch-all:low', 'catch-all:medium'],
+  permissive: ['valid:low', 'valid:medium', 'catch-all:low', 'catch-all:medium', 'role:low'],
+});
+const DEFAULT_EMAIL_VERIFICATION_ALLOWED_OUTCOMES = Object.freeze(
+  EMAIL_VERIFICATION_POLICY_ALLOWED_OUTCOMES.balanced
+);
+
+type EmailVerificationPolicy = keyof typeof EMAIL_VERIFICATION_POLICY_ALLOWED_OUTCOMES;
+const EMAIL_VERIFICATION_POLICIES = Object.keys(
+  EMAIL_VERIFICATION_POLICY_ALLOWED_OUTCOMES
+) as EmailVerificationPolicy[];
+
 /**
  * Get throttling configuration from environment variables
  * All values have sensible defaults for production use
@@ -168,6 +182,29 @@ export function shouldBypassVerifierApi(): boolean {
   const env = getEnv();
   const bypass = env.BYPASS_MYEMAILVERIFIER_API || process.env.BYPASS_MYEMAILVERIFIER_API;
   return bypass === 'true';
+}
+
+/**
+ * Get the verification outcomes that are allowed to proceed to sending.
+ * Controlled by the EMAIL_VERIFICATION_POLICY environment variable.
+ */
+export function getAllowedVerificationOutcomes(): ReadonlySet<string> {
+  const env = getEnv();
+  const rawPolicyName = env.EMAIL_VERIFICATION_POLICY || process.env.EMAIL_VERIFICATION_POLICY;
+
+  if (rawPolicyName?.trim()) {
+    const normalizedPolicy = rawPolicyName.trim().toLowerCase() as EmailVerificationPolicy;
+
+    if (!EMAIL_VERIFICATION_POLICIES.includes(normalizedPolicy)) {
+      throw new Error(
+        `Invalid EMAIL_VERIFICATION_POLICY "${rawPolicyName}". Expected one of: ${EMAIL_VERIFICATION_POLICIES.join(', ')}`
+      );
+    }
+
+    return new Set(EMAIL_VERIFICATION_POLICY_ALLOWED_OUTCOMES[normalizedPolicy]);
+  }
+
+  return new Set(DEFAULT_EMAIL_VERIFICATION_ALLOWED_OUTCOMES);
 }
 
 /**

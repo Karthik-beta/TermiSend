@@ -9,3 +9,4 @@ export { useCampaign } from './useCampaign.js';
 export { useContacts } from './useContacts.js';
 export { useImport } from './useImport.js';
 export { useNavigation } from './useNavigation.js';
+export { useUnsubscribe } from './useUnsubscribe.js';

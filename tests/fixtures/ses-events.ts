@@ -9,6 +9,7 @@ import type {
   SESBounceData,
   SESComplaintData,
   SESDeliveryData,
+  SESDeliveryDelayData,
   SESOpenData,
   SESClickData,
   SESSendData,
@@ -237,6 +238,45 @@ export function createDeliveryNotification(): string {
   return createSNSNotificationBody(JSON.stringify(createDeliveryEventRecord()));
 }
 
+/**
+ * Create a delivery delay SES event record
+ */
+export function createDeliveryDelayEventRecord(
+  overrides: Partial<SESEventRecord> = {}
+): SESEventRecord {
+  const deliveryDelayData: SESDeliveryDelayData = {
+    timestamp: new Date().toISOString(),
+    delayType: 'TransientCommunicationFailure',
+    expirationTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    delayedRecipients: [
+      {
+        emailAddress: 'recipient@example.com',
+        status: '4.4.1',
+        diagnosticCode: 'smtp; 421 4.4.1 connection timed out',
+      },
+    ],
+  };
+
+  return {
+    eventType: 'DeliveryDelay',
+    eventTime: new Date().toISOString(),
+    mail: {
+      ...baseMailData,
+      messageId: 'delivery-delay-message-id-12345',
+      destination: ['recipient@example.com'],
+    },
+    deliveryDelay: deliveryDelayData,
+    ...overrides,
+  };
+}
+
+/**
+ * Create a delivery delay SNS notification body
+ */
+export function createDeliveryDelayNotification(): string {
+  return createSNSNotificationBody(JSON.stringify(createDeliveryDelayEventRecord()));
+}
+
 // ============================================================================
 // Open Events
 // ============================================================================
@@ -432,6 +472,33 @@ export function createInvalidSESEventNotification(): string {
  */
 export function createMalformedJSONNotification(): string {
   return '{"Type": "Notification", "Message": }'; // Invalid JSON
+}
+
+/**
+ * Create a raw SES event body as delivered by SNS raw message delivery.
+ */
+export function createRawSESEventMessage(
+  event: SESEventRecord = createHardBounceEventRecord()
+): string {
+  return JSON.stringify(event);
+}
+
+/**
+ * Create an SNS subscription confirmation message body.
+ */
+export function createSubscriptionConfirmationNotification(): string {
+  return JSON.stringify({
+    Type: 'SubscriptionConfirmation',
+    MessageId: `sns-message-${Date.now()}`,
+    Token: 'subscription-token',
+    TopicArn: 'arn:aws:sns:us-east-1:123456789:termisend-ses-email-events',
+    Message: 'You have chosen to subscribe to the topic.',
+    SubscribeURL: 'https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription',
+    Timestamp: new Date().toISOString(),
+    SignatureVersion: '1',
+    Signature: 'test-signature',
+    SigningCertURL: 'https://sns.us-east-1.amazonaws.com/cert.pem',
+  });
 }
 
 /**

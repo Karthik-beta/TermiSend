@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   getAnalyticsConfig,
   getAnalyticsRateLimitMs,
+  getAllowedVerificationOutcomes,
   getEnv,
   getQuotaBufferPercent,
   getSesRateLimit,
@@ -43,6 +44,66 @@ describe('Configuration Module', () => {
       resetEnvCacheForTesting();
 
       expect(shouldBypassVerifierApi()).toBe(false);
+    });
+  });
+
+  describe('getAllowedVerificationOutcomes()', () => {
+    it('should return the default balanced policy when not configured', () => {
+      resetEnvCacheForTesting();
+
+      expect(Array.from(getAllowedVerificationOutcomes())).toEqual([
+        'valid:low',
+        'catch-all:low',
+        'catch-all:medium',
+      ]);
+    });
+
+    it('should parse the strict policy', () => {
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'strict',
+      });
+      resetEnvCacheForTesting();
+
+      expect(Array.from(getAllowedVerificationOutcomes())).toEqual(['valid:low']);
+    });
+
+    it('should parse the permissive policy', () => {
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'permissive',
+      });
+      resetEnvCacheForTesting();
+
+      expect(Array.from(getAllowedVerificationOutcomes())).toEqual([
+        'valid:low',
+        'valid:medium',
+        'catch-all:low',
+        'catch-all:medium',
+        'role:low',
+      ]);
+    });
+
+    it('should normalize policy casing and whitespace', () => {
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: '  BaLaNcEd  ',
+      });
+      resetEnvCacheForTesting();
+
+      expect(Array.from(getAllowedVerificationOutcomes())).toEqual([
+        'valid:low',
+        'catch-all:low',
+        'catch-all:medium',
+      ]);
+    });
+
+    it('should throw for invalid policy values', () => {
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'wide-open',
+      });
+      resetEnvCacheForTesting();
+
+      expect(() => getAllowedVerificationOutcomes()).toThrow(
+        'Invalid EMAIL_VERIFICATION_POLICY "wide-open". Expected one of: strict, balanced, permissive'
+      );
     });
   });
 

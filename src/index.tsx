@@ -5,7 +5,11 @@
 
 /** @jsxImportSource react */
 import { render } from 'ink';
-import { isSQSConsumerEnabled } from './config.js';
+import {
+  getSESConfigurationSetName,
+  getSQSConfig,
+  isSQSConsumerEnabled,
+} from './config.js';
 import { closeConnection, initializeSchema } from './db.js';
 import { logger } from './logger.js';
 import { shutdown } from './shutdown.js';
@@ -20,8 +24,12 @@ async function main(): Promise<void> {
   try {
     await initializeSchema();
 
+    const sqsConfig = getSQSConfig();
+    const sqsEnabled = isSQSConsumerEnabled();
+    const configurationSetName = getSESConfigurationSetName();
+
     // Start SQS consumer if enabled
-    if (isSQSConsumerEnabled()) {
+    if (sqsEnabled) {
       try {
         // Start consumer in the background - don't await the infinite loop
         startConsumer().catch((error) => {
@@ -34,6 +42,15 @@ async function main(): Promise<void> {
         await logger.warn('SQS consumer failed to start', { error: errorMessage });
         // Continue without SQS consumer - it's optional
       }
+    } else if (configurationSetName) {
+      const reason = sqsConfig
+        ? 'SQS_CONSUMER_ENABLED is not set to true'
+        : 'SQS_QUEUE_URL or AWS credentials for SQS are missing';
+
+      await logger.warn(
+        `SES configuration set "${configurationSetName}" is active, but the SQS consumer is not running. SES delivery, bounce, complaint, open, and click events will not be recorded in the app.`,
+        { reason }
+      );
     }
 
     // Render the Ink UI

@@ -3,7 +3,8 @@
  * Tests MyEmailVerifier API integration with mocked fetch and Zod validation
  */
 
-import { describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
+import { resetEnvCacheForTesting } from '../../src/config.js';
 import {
   getVerificationStatusDescription,
   isEmailSafe,
@@ -19,8 +20,14 @@ import {
   createUnknownVerificationResponse,
   createValidVerificationResponse,
 } from '../helpers/mock-factories.js';
+import { restoreEnv, setMockEnv } from '../helpers/test-utils.js';
 
 describe('Verifier Module', () => {
+  beforeEach(() => {
+    resetEnvCacheForTesting();
+    restoreEnv();
+  });
+
   describe('isEmailSafe()', () => {
     it('should return true for valid emails with low risk', () => {
       // Arrange
@@ -130,6 +137,51 @@ describe('Verifier Module', () => {
 
       // Assert
       expect(isSafe).toBe(false);
+    });
+
+    it('should allow valid emails with medium risk when configured', () => {
+      // Arrange
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'permissive',
+      });
+      resetEnvCacheForTesting();
+      const result = createValidVerificationResponse({ risk: 'medium' });
+
+      // Act
+      const isSafe = isEmailSafe(result);
+
+      // Assert
+      expect(isSafe).toBe(true);
+    });
+
+    it('should reject catch-all with medium risk when configured out', () => {
+      // Arrange
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'strict',
+      });
+      resetEnvCacheForTesting();
+      const result = createCatchAllVerificationResponse({ risk: 'medium' });
+
+      // Act
+      const isSafe = isEmailSafe(result);
+
+      // Assert
+      expect(isSafe).toBe(false);
+    });
+
+    it('should allow role-based emails when explicitly configured', () => {
+      // Arrange
+      setMockEnv({
+        EMAIL_VERIFICATION_POLICY: 'permissive',
+      });
+      resetEnvCacheForTesting();
+      const result = createRoleVerificationResponse({ risk: 'low' });
+
+      // Act
+      const isSafe = isEmailSafe(result);
+
+      // Assert
+      expect(isSafe).toBe(true);
     });
   });
 

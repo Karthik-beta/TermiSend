@@ -26,11 +26,13 @@ export function StatusBar({
   const getShortcuts = (view: DashboardView): string[] => {
     switch (view) {
       case 'MENU':
-        return ['↑↓ Navigate', 'Enter Select', 'Q Quit'];
+        return ['↑↓ Navigate', 'Enter Select', 'U Unsubscribe', 'Q Quit'];
       case 'IMPORT':
         return ['Enter Import', 'T Template', 'Esc Back', 'Q Quit'];
       case 'CAMPAIGN':
         return ['Enter Preview', 'Y Confirm', 'N Cancel', 'Esc Back', 'Q Quit'];
+      case 'UNSUBSCRIBE':
+        return ['Enter Save', 'Esc Clear/Back', 'Q Quit'];
       case 'RESULTS':
         return ['Esc Back', 'R Refresh', 'Q Quit'];
       default:

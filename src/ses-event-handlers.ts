@@ -23,6 +23,7 @@ import type {
   SESClickData,
   SESComplaintData,
   SESDeliveryData,
+  SESDeliveryDelayData,
   SESOpenData,
 } from './types.js';
 
@@ -50,6 +51,22 @@ async function persistAnalyticsEvent(event: {
   });
 }
 
+type ResolvedSendLog = Awaited<ReturnType<typeof getSendLogByMessageId>>;
+
+async function resolveSendLogForEvent(event: ParsedSESEvent): Promise<ResolvedSendLog> {
+  switch (event.eventType) {
+    case 'Bounce':
+    case 'Complaint':
+    case 'Delivery':
+    case 'DeliveryDelay':
+    case 'Open':
+    case 'Click':
+      return await getSendLogByMessageId(event.messageId);
+    default:
+      return null;
+  }
+}
+
 // ============================================================================
 // Main Event Router
 // ============================================================================
@@ -62,6 +79,7 @@ async function persistAnalyticsEvent(event: {
  */
 export async function processSESEvent(event: ParsedSESEvent): Promise<EventProcessingResult> {
   const startTime = Date.now();
+  let resolvedSendLog: ResolvedSendLog = null;
 
   logger
     .info(`Processing SES event: ${event.eventType} for message ${event.messageId}`)
@@ -79,6 +97,8 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
 
   // Create SES event tracking record (best effort - don't fail on tracking errors)
   try {
+    resolvedSendLog = await resolveSendLogForEvent(event);
+
     // Validate event data size to prevent database bloat
     const rawEventData = event.rawEvent as unknown as Record<string, unknown>;
     const eventDataSize = Buffer.byteLength(JSON.stringify(rawEventData), 'utf8');
@@ -90,12 +110,15 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
           `SES event data exceeds size limit (${eventDataSize} bytes), storing truncated version`
         )
         .catch((e) => console.error('Log failed:', e));
-      // Store only essential fields to prevent database bloat
       eventDataToStore = {
-        messageId: rawEventData.MessageId,
-        notificationType: rawEventData.NotificationType,
-        mail: rawEventData.mail,
-        // Include truncated version of event data
+        eventType: event.rawEvent.eventType,
+        eventTime: event.rawEvent.eventTime,
+        mail: {
+          messageId: event.rawEvent.mail.messageId,
+          source: event.rawEvent.mail.source,
+          destination: event.rawEvent.mail.destination,
+          timestamp: event.rawEvent.mail.timestamp,
+        },
         truncated: true,
         originalSize: eventDataSize,
       };
@@ -107,6 +130,8 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
       eventType: event.eventType,
       snsMessageId: event.eventId,
       sesMessageId: event.messageId,
+      contactId: resolvedSendLog?.contactId,
+      sendLogId: resolvedSendLog?.id,
       recipientEmail: event.recipients.length > 0 ? event.recipients[0] : event.source,
       sourceEmail: event.source,
       eventData: eventDataToStore,
@@ -125,19 +150,40 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
   try {
     switch (event.eventType) {
       case 'Bounce':
-        result = await handleBounceEvent(event as ParsedSESEvent & { data: SESBounceData });
+        result = await handleBounceEvent(
+          event as ParsedSESEvent & { data: SESBounceData },
+          resolvedSendLog
+        );
         break;
       case 'Complaint':
-        result = await handleComplaintEvent(event as ParsedSESEvent & { data: SESComplaintData });
+        result = await handleComplaintEvent(
+          event as ParsedSESEvent & { data: SESComplaintData },
+          resolvedSendLog
+        );
         break;
       case 'Delivery':
-        result = await handleDeliveryEvent(event as ParsedSESEvent & { data: SESDeliveryData });
+        result = await handleDeliveryEvent(
+          event as ParsedSESEvent & { data: SESDeliveryData },
+          resolvedSendLog
+        );
+        break;
+      case 'DeliveryDelay':
+        result = await handleDeliveryDelayEvent(
+          event as ParsedSESEvent & { data: SESDeliveryDelayData },
+          resolvedSendLog
+        );
         break;
       case 'Open':
-        result = await handleOpenEvent(event as ParsedSESEvent & { data: SESOpenData });
+        result = await handleOpenEvent(
+          event as ParsedSESEvent & { data: SESOpenData },
+          resolvedSendLog
+        );
         break;
       case 'Click':
-        result = await handleClickEvent(event as ParsedSESEvent & { data: SESClickData });
+        result = await handleClickEvent(
+          event as ParsedSESEvent & { data: SESClickData },
+          resolvedSendLog
+        );
         break;
       case 'Send':
         result = await handleSendEvent(event);
@@ -195,14 +241,14 @@ export async function processSESEvent(event: ParsedSESEvent): Promise<EventProce
  * @returns Processing result
  */
 export async function handleBounceEvent(
-  event: ParsedSESEvent & { data: SESBounceData }
+  event: ParsedSESEvent & { data: SESBounceData },
+  preloadedSendLog: ResolvedSendLog = null
 ): Promise<EventProcessingResult> {
   const affectedContactIds: string[] = [];
   const updatedSendLogIds: string[] = [];
 
   try {
-    // Find send log by message ID
-    const sendLog = await getSendLogByMessageId(event.messageId);
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
 
     if (!sendLog) {
       logger
@@ -227,8 +273,10 @@ export async function handleBounceEvent(
     // Suppress contact for hard bounces (Permanent)
     let suppressed = false;
     if (event.data.bounceType === 'Permanent') {
+      const suppressionEmail = sendLog.email || event.recipients[0];
       await suppressContact(
         sendLog.contactId,
+        suppressionEmail,
         `Hard bounce: ${event.data.bounceSubType}`,
         'bounce'
       );
@@ -239,6 +287,7 @@ export async function handleBounceEvent(
       await persistAnalyticsEvent(
         createEvent(DomainEventType.CONTACT_SUPPRESSED, {
           contactId: sendLog.contactId,
+          email: suppressionEmail,
           messageId: event.messageId,
           reason: `Hard bounce: ${event.data.bounceSubType}`,
           suppressionType: 'bounce',
@@ -249,7 +298,10 @@ export async function handleBounceEvent(
       emitAnalyticsEvent({
         type: 'contact:suppressed',
         contactId: sendLog.contactId,
+        email: suppressionEmail,
         reason: `Bounce: ${event.data.bounceSubType}`,
+        suppressionType: 'bounce',
+        messageId: event.messageId,
       });
     }
 
@@ -301,14 +353,14 @@ export async function handleBounceEvent(
  * @returns Processing result
  */
 export async function handleComplaintEvent(
-  event: ParsedSESEvent & { data: SESComplaintData }
+  event: ParsedSESEvent & { data: SESComplaintData },
+  preloadedSendLog: ResolvedSendLog = null
 ): Promise<EventProcessingResult> {
   const affectedContactIds: string[] = [];
   const updatedSendLogIds: string[] = [];
 
   try {
-    // Find send log by message ID
-    const sendLog = await getSendLogByMessageId(event.messageId);
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
 
     if (!sendLog) {
       logger
@@ -327,8 +379,10 @@ export async function handleComplaintEvent(
     await updateSendLogComplained(sendLog.id, event.data as unknown as Record<string, unknown>);
 
     // Suppress contact (all complaints should suppress)
+    const suppressionEmail = sendLog.email || event.recipients[0];
     await suppressContact(
       sendLog.contactId,
+      suppressionEmail,
       `Complaint: ${event.data.complaintFeedbackType || 'unknown'}`,
       'complaint'
     );
@@ -338,6 +392,7 @@ export async function handleComplaintEvent(
     await persistAnalyticsEvent(
       createEvent(DomainEventType.CONTACT_SUPPRESSED, {
         contactId: sendLog.contactId,
+        email: suppressionEmail,
         messageId: event.messageId,
         reason: `Complaint: ${event.data.complaintFeedbackType || 'unknown'}`,
         suppressionType: 'complaint',
@@ -360,7 +415,10 @@ export async function handleComplaintEvent(
     emitAnalyticsEvent({
       type: 'contact:suppressed',
       contactId: sendLog.contactId,
+      email: suppressionEmail,
       reason: `Complaint: ${event.data.complaintFeedbackType || 'unknown'}`,
+      suppressionType: 'complaint',
+      messageId: event.messageId,
     });
 
     emitAnalyticsEvent({
@@ -396,14 +454,14 @@ export async function handleComplaintEvent(
  * @returns Processing result
  */
 export async function handleDeliveryEvent(
-  event: ParsedSESEvent & { data: SESDeliveryData }
+  event: ParsedSESEvent & { data: SESDeliveryData },
+  preloadedSendLog: ResolvedSendLog = null
 ): Promise<EventProcessingResult> {
   const affectedContactIds: string[] = [];
   const updatedSendLogIds: string[] = [];
 
   try {
-    // Find send log by message ID
-    const sendLog = await getSendLogByMessageId(event.messageId);
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
 
     if (!sendLog) {
       logger
@@ -462,20 +520,73 @@ export async function handleDeliveryEvent(
 }
 
 /**
+ * Handle delivery delay event
+ * Tracks the delay without changing terminal send state because SES may still deliver later.
+ * @param event - Parsed SES event with delivery delay data
+ * @returns Processing result
+ */
+export async function handleDeliveryDelayEvent(
+  event: ParsedSESEvent & { data: SESDeliveryDelayData },
+  preloadedSendLog: ResolvedSendLog = null
+): Promise<EventProcessingResult> {
+  const affectedContactIds: string[] = [];
+  const updatedSendLogIds: string[] = [];
+
+  try {
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
+
+    if (!sendLog) {
+      logger
+        .warn(`Send log not found for delayed message ID: ${event.messageId}`)
+        .catch((e) => console.error('Log failed:', e));
+      return {
+        success: true,
+        affectedContactIds,
+        updatedSendLogIds,
+      };
+    }
+
+    logger
+      .info(
+        `Delivery delay recorded for ${event.messageId}: ${event.data.delayType || 'unknown delay'}`
+      )
+      .catch((e) => console.error('Log failed:', e));
+
+    return {
+      success: true,
+      affectedContactIds,
+      updatedSendLogIds,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger
+      .warn(`Failed to handle delivery delay event: ${errorMessage}`)
+      .catch((e) => console.error('Log failed:', e));
+
+    return {
+      success: false,
+      error: errorMessage,
+      affectedContactIds,
+      updatedSendLogIds,
+    };
+  }
+}
+
+/**
  * Handle open event
  * Records open event for analytics
  * @param event - Parsed SES event with open data
  * @returns Processing result
  */
 export async function handleOpenEvent(
-  event: ParsedSESEvent & { data: SESOpenData }
+  event: ParsedSESEvent & { data: SESOpenData },
+  preloadedSendLog: ResolvedSendLog = null
 ): Promise<EventProcessingResult> {
   const affectedContactIds: string[] = [];
   const updatedSendLogIds: string[] = [];
 
   try {
-    // Find send log by message ID
-    const sendLog = await getSendLogByMessageId(event.messageId);
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
 
     if (!sendLog) {
       logger
@@ -547,14 +658,14 @@ export async function handleOpenEvent(
  * @returns Processing result
  */
 export async function handleClickEvent(
-  event: ParsedSESEvent & { data: SESClickData }
+  event: ParsedSESEvent & { data: SESClickData },
+  preloadedSendLog: ResolvedSendLog = null
 ): Promise<EventProcessingResult> {
   const affectedContactIds: string[] = [];
   const updatedSendLogIds: string[] = [];
 
   try {
-    // Find send log by message ID
-    const sendLog = await getSendLogByMessageId(event.messageId);
+    const sendLog = preloadedSendLog || (await getSendLogByMessageId(event.messageId));
 
     if (!sendLog) {
       logger

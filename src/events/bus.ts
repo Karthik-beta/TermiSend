@@ -29,7 +29,14 @@ export type AnalyticsEvent =
   | { type: 'email:complained'; contactId: string; messageId: string }
   | { type: 'email:opened'; contactId: string; messageId: string }
   | { type: 'email:clicked'; contactId: string; messageId: string; link: string }
-  | { type: 'contact:suppressed'; contactId: string; reason: string }
+  | {
+      type: 'contact:suppressed';
+      email: string;
+      reason: string;
+      suppressionType: 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
+      contactId?: string;
+      messageId?: string;
+    }
   | { type: 'verifier:credits_updated'; credits: number };
 
 // Helper function to emit events

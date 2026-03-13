@@ -22,6 +22,35 @@ export interface Contact {
 }
 
 /**
+ * Supported suppression reasons that block future sends
+ */
+export type SuppressionType = 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
+
+/**
+ * Represents a suppression entry that blocks future sends to an email
+ */
+export interface ContactSuppression {
+  id: string;
+  contactId: string | null;
+  email: string;
+  suppressionType: SuppressionType;
+  suppressionReason: string;
+  sesMessageId: string | null;
+  suppressedAt: Date;
+}
+
+/**
+ * Result of a manual unsubscribe action
+ */
+export interface UnsubscribeResult {
+  status: 'created' | 'already_suppressed';
+  email: string;
+  contactId?: string;
+  suppressionType?: SuppressionType;
+  suppressionReason?: string;
+}
+
+/**
  * Analytics event record as stored in the database
  */
 export interface AnalyticsEventRecord {
@@ -558,6 +587,7 @@ export type SESEventType =
   | 'Bounce'
   | 'Complaint'
   | 'Delivery'
+  | 'DeliveryDelay'
   | 'Open'
   | 'Click'
   | 'Send'
@@ -711,6 +741,36 @@ export interface SESDeliveryData {
 }
 
 /**
+ * Delayed recipient details
+ */
+export interface SESDelayedRecipient {
+  /** Email address whose delivery is delayed */
+  emailAddress: string;
+  /** SMTP status code from the destination MTA */
+  status?: string;
+  /** Diagnostic details about the delay */
+  diagnosticCode?: string;
+}
+
+/**
+ * Delivery delay event data
+ */
+export interface SESDeliveryDelayData {
+  /** Timestamp when SES reported the delay */
+  timestamp: string;
+  /** SES delay classification */
+  delayType?: string;
+  /** Whether SES marked the message as expired */
+  expired?: boolean;
+  /** Deadline for SES retry attempts */
+  expirationTime?: string;
+  /** Reporting MTA */
+  reportingMTA?: string;
+  /** Recipients currently delayed */
+  delayedRecipients: SESDelayedRecipient[];
+}
+
+/**
  * Open event data
  * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html#event-publishing-retrieving-sns-contents-open
  */
@@ -781,6 +841,7 @@ export interface SESEventRecord {
   bounce?: SESBounceData;
   complaint?: SESComplaintData;
   delivery?: SESDeliveryData;
+  deliveryDelay?: SESDeliveryDelayData;
   open?: SESOpenData;
   click?: SESClickData;
   send?: SESSendData;
@@ -809,6 +870,7 @@ export interface ParsedSESEvent {
     | SESBounceData
     | SESComplaintData
     | SESDeliveryData
+    | SESDeliveryDelayData
     | SESOpenData
     | SESClickData
     | SESSendData
@@ -893,6 +955,8 @@ export interface EventProcessingResult {
   success: boolean;
   /** Error message if failed */
   error?: string;
+  /** Whether the failure is permanent and should not be retried */
+  nonRetryable?: boolean;
   /** IDs of affected contacts */
   affectedContactIds: string[];
   /** IDs of updated send logs */

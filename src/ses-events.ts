@@ -10,6 +10,7 @@ import type {
   SESClickData,
   SESComplaintData,
   SESDeliveryData,
+  SESDeliveryDelayData,
   SESEventRecord,
   SESEventType,
   SESFailureData,
@@ -18,6 +19,20 @@ import type {
   SESSendData,
   SNSNotification,
 } from './types.js';
+
+export type ParseSESEventResult =
+  | {
+      kind: 'event';
+      event: ParsedSESEvent;
+    }
+  | {
+      kind: 'skip';
+      reason: string;
+    }
+  | {
+      kind: 'invalid';
+      reason: string;
+    };
 
 // ============================================================================
 // Parser Functions
@@ -89,12 +104,7 @@ export function parseSESEventRecord(snsMessage: string): SESEventRecord | null {
     const record = parsed as Record<string, unknown>;
 
     // Validate required fields
-    if (
-      typeof record.eventType !== 'string' ||
-      typeof record.eventTime !== 'string' ||
-      typeof record.mail !== 'object' ||
-      record.mail === null
-    ) {
+    if (typeof record.eventType !== 'string' || typeof record.mail !== 'object' || record.mail === null) {
       return null;
     }
 
@@ -116,7 +126,15 @@ export function parseSESEventRecord(snsMessage: string): SESEventRecord | null {
       return null;
     }
 
-    return record as unknown as SESEventRecord;
+    const eventTime = resolveEventTime(record, mail);
+    if (!eventTime) {
+      return null;
+    }
+
+    return {
+      ...(record as unknown as Omit<SESEventRecord, 'eventTime'>),
+      eventTime,
+    };
   } catch (error) {
     logger.warn(
       `Failed to parse SES event record: ${error instanceof Error ? error.message : String(error)}`
@@ -125,54 +143,120 @@ export function parseSESEventRecord(snsMessage: string): SESEventRecord | null {
   }
 }
 
+function resolveEventTime(
+  record: Record<string, unknown>,
+  mail: Record<string, unknown>
+): string | null {
+  if (typeof record.eventTime === 'string') {
+    return record.eventTime;
+  }
+
+  const eventDataFields = [
+    'bounce',
+    'complaint',
+    'delivery',
+    'deliveryDelay',
+    'open',
+    'click',
+  ] as const;
+  for (const field of eventDataFields) {
+    const value = record[field];
+    if (
+      typeof value === 'object' &&
+      value !== null &&
+      typeof (value as Record<string, unknown>).timestamp === 'string'
+    ) {
+      return (value as Record<string, unknown>).timestamp as string;
+    }
+  }
+
+  if (typeof mail.timestamp === 'string') {
+    return mail.timestamp;
+  }
+
+  return null;
+}
+
 /**
  * Main entry point: Parse complete SQS message to structured SES event
  * Performs full validation and transformation
  * @param messageBody - SQS message body
  * @returns Parsed event or null if parsing fails
  */
-export function parseSESEvent(messageBody: string): ParsedSESEvent | null {
+export function parseSESEventMessage(messageBody: string): ParseSESEventResult {
   try {
-    // Step 1: Parse SNS notification wrapper
     const snsNotification = parseSNSNotification(messageBody);
-    if (!snsNotification) {
-      logger.warn('Failed to parse SNS notification from message body');
-      return null;
+
+    if (snsNotification) {
+      if (snsNotification.Type !== 'Notification') {
+        return {
+          kind: 'skip',
+          reason: `Skipping SNS ${snsNotification.Type} message`,
+        };
+      }
+
+      const sesRecord = parseSESEventRecord(snsNotification.Message);
+      if (!sesRecord) {
+        logger.warn('Failed to parse SES event record from SNS message');
+        return {
+          kind: 'invalid',
+          reason: 'Failed to parse SES event record from SNS message',
+        };
+      }
+
+      const event = buildParsedEvent(sesRecord, snsNotification.MessageId);
+      if (!event) {
+        return {
+          kind: 'invalid',
+          reason: `Failed to extract event data for type: ${sesRecord.eventType}`,
+        };
+      }
+
+      return {
+        kind: 'event',
+        event,
+      };
     }
 
-    // Step 2: Parse SES event from SNS Message field
-    const sesRecord = parseSESEventRecord(snsNotification.Message);
+    const sesRecord = parseSESEventRecord(messageBody);
     if (!sesRecord) {
-      logger.warn('Failed to parse SES event record from SNS message');
-      return null;
+      logger.warn('Failed to parse SES event from message body');
+      return {
+        kind: 'invalid',
+        reason: 'Failed to parse SES event from message body',
+      };
     }
 
-    // Step 3: Extract event-specific data
-    const eventData = extractEventData(sesRecord);
-    if (!eventData) {
-      logger.warn(`Failed to extract event data for type: ${sesRecord.eventType}`);
-      return null;
+    const event = buildParsedEvent(sesRecord, sesRecord.mail.messageId);
+    if (!event) {
+      return {
+        kind: 'invalid',
+        reason: `Failed to extract event data for type: ${sesRecord.eventType}`,
+      };
     }
 
-    // Step 4: Build parsed event
-    const parsedEvent: ParsedSESEvent = {
-      eventId: snsNotification.MessageId,
-      eventType: sesRecord.eventType,
-      timestamp: new Date(sesRecord.eventTime),
-      messageId: sesRecord.mail.messageId,
-      recipients: extractRecipients(sesRecord),
-      source: sesRecord.mail.source,
-      data: eventData,
-      rawEvent: sesRecord,
+    return {
+      kind: 'event',
+      event,
     };
-
-    return parsedEvent;
   } catch (error) {
     logger.warn(
       `Failed to parse SES event: ${error instanceof Error ? error.message : String(error)}`
     );
-    return null;
+    return {
+      kind: 'invalid',
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
+}
+
+/**
+ * Backwards-compatible event parser that returns only the parsed event.
+ * Use parseSESEventMessage() when the caller needs skip vs invalid classification.
+ */
+export function parseSESEvent(messageBody: string): ParsedSESEvent | null {
+  const result = parseSESEventMessage(messageBody);
+  return result.kind === 'event' ? result.event : null;
 }
 
 /**
@@ -185,6 +269,7 @@ export function isSupportedEventType(eventType: string): eventType is SESEventTy
     'Bounce',
     'Complaint',
     'Delivery',
+    'DeliveryDelay',
     'Open',
     'Click',
     'Send',
@@ -214,6 +299,10 @@ export function extractRecipients(event: SESEventRecord): string[] {
     return event.delivery.recipients;
   }
 
+  if (event.deliveryDelay?.delayedRecipients) {
+    return event.deliveryDelay.delayedRecipients.map((recipient) => recipient.emailAddress);
+  }
+
   // Default to mail.destination
   return event.mail.destination || [];
 }
@@ -229,6 +318,7 @@ function extractEventData(
   | SESBounceData
   | SESComplaintData
   | SESDeliveryData
+  | SESDeliveryDelayData
   | SESOpenData
   | SESClickData
   | SESSendData
@@ -242,6 +332,8 @@ function extractEventData(
       return event.complaint || null;
     case 'Delivery':
       return event.delivery || null;
+    case 'DeliveryDelay':
+      return event.deliveryDelay || null;
     case 'Open':
       return event.open || null;
     case 'Click':
@@ -255,6 +347,28 @@ function extractEventData(
     default:
       return null;
   }
+}
+
+function buildParsedEvent(
+  sesRecord: SESEventRecord,
+  eventId: string
+): ParsedSESEvent | null {
+  const eventData = extractEventData(sesRecord);
+  if (!eventData) {
+    logger.warn(`Failed to extract event data for type: ${sesRecord.eventType}`);
+    return null;
+  }
+
+  return {
+    eventId,
+    eventType: sesRecord.eventType,
+    timestamp: new Date(sesRecord.eventTime),
+    messageId: sesRecord.mail.messageId,
+    recipients: extractRecipients(sesRecord),
+    source: sesRecord.mail.source,
+    data: eventData,
+    rawEvent: sesRecord,
+  };
 }
 
 // ============================================================================

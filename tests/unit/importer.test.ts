@@ -95,6 +95,26 @@ describe('Importer Module', () => {
       expect(result.failedCount).toBe(0);
     });
 
+    it('should import when the first worksheet has a non-sequential sheet ID', async () => {
+      try { mkdirSync(TEST_DIR, { recursive: true }); } catch { /* already exists */ }
+      const filePath = join(TEST_DIR, 'test-non-sequential-sheet-id.xlsx');
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Contacts');
+      worksheet.id = 2;
+      worksheet.addRow(['Company Name', 'Person Name', 'Email']);
+      worksheet.addRow(['Acme Corp', 'John Doe', 'john@acme.com']);
+      await workbook.xlsx.writeFile(filePath);
+
+      mockInsertContactSkipDuplicate.mockImplementation(() => Promise.resolve(true));
+
+      const result = await importExcelFile(filePath);
+
+      expect(result.totalRows).toBe(1);
+      expect(result.insertedCount).toBe(1);
+      expect(result.failedCount).toBe(0);
+    });
+
     it('should handle rows with various data types', async () => {
       // Ensure test directory exists
       try { mkdirSync(TEST_DIR, { recursive: true }); } catch { /* already exists */ }
