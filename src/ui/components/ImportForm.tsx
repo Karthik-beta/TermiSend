@@ -95,6 +95,10 @@ export function ImportForm({ onImportComplete }: ImportFormProps): React.ReactEl
             <WarningText>{importResult.skippedCount}</WarningText>
           </Box>
           <Box>
+            <Text>Blocked (suppressed): </Text>
+            <WarningText>{importResult.blockedCount}</WarningText>
+          </Box>
+          <Box>
             <Text>Failed: </Text>
             <Text color={importResult.failedCount > 0 ? colors.error : colors.success}>
               {importResult.failedCount}

@@ -248,6 +248,10 @@ export const IMPORT_SUCCESS: ImportResult = {
   totalRows: 10,
   successCount: 10,
   failedCount: 0,
+  insertedCount: 10,
+  skippedCount: 0,
+  existingCount: 0,
+  blockedCount: 0,
   errors: [],
 };
 
@@ -256,6 +260,10 @@ export const IMPORT_PARTIAL: ImportResult = {
   totalRows: 10,
   successCount: 7,
   failedCount: 3,
+  insertedCount: 5,
+  skippedCount: 1,
+  existingCount: 2,
+  blockedCount: 1,
   errors: [
     { row: 3, error: 'Invalid email format' },
     { row: 6, error: 'Missing company name' },
@@ -268,6 +276,10 @@ export const IMPORT_FAILED: ImportResult = {
   totalRows: 5,
   successCount: 0,
   failedCount: 5,
+  insertedCount: 0,
+  skippedCount: 0,
+  existingCount: 0,
+  blockedCount: 0,
   errors: [
     { row: 2, error: 'Invalid email format' },
     { row: 3, error: 'Missing person name' },
@@ -282,6 +294,10 @@ export const IMPORT_EMPTY: ImportResult = {
   totalRows: 0,
   successCount: 0,
   failedCount: 0,
+  insertedCount: 0,
+  skippedCount: 0,
+  existingCount: 0,
+  blockedCount: 0,
   errors: [],
 };
 

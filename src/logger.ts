@@ -28,6 +28,7 @@ export interface Logger {
     insertedCount: number;
     skippedCount: number;
     existingCount: number;
+    blockedCount: number;
   }): Promise<void>;
   logApiVerifierRequest(email: string): Promise<void>;
   logApiVerifierResponse(email: string, response: Record<string, unknown>): Promise<void>;
@@ -139,6 +140,7 @@ export class AuditLogger implements Logger {
     insertedCount: number;
     skippedCount: number;
     existingCount: number;
+    blockedCount: number;
   }): Promise<void> {
     await this.logEvent('EXCEL_IMPORT_COMPLETE', {
       ...result,

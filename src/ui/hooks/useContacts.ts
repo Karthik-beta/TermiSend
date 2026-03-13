@@ -8,8 +8,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getContacts, getEligibleContactCount } from '../../db.js';
-import type { Contact } from '../../types.js';
+import { getContactsWithSuppression, getEligibleContactCount } from '../../db.js';
+import type { ContactWithSuppression } from '../../types.js';
 import type { ContactsState } from '../types.js';
 
 /**
@@ -30,7 +30,7 @@ interface ContactsActions {
  * @returns Contact state and actions
  */
 export function useContacts(autoLoad = true): ContactsState & ContactsActions {
-  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [contacts, setContacts] = useState<ContactWithSuppression[]>([]);
   const [pendingCount, setPendingCount] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +45,7 @@ export function useContacts(autoLoad = true): ContactsState & ContactsActions {
 
     try {
       // Load all contacts (no status filter)
-      const allContacts = await getContacts();
+      const allContacts = await getContactsWithSuppression();
       const eligibleCount = await getEligibleContactCount();
 
       // Only update if this is still the most recent request and component is mounted

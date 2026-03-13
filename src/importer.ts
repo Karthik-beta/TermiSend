@@ -5,7 +5,7 @@
 
 import ExcelJs from 'exceljs';
 import { z } from 'zod';
-import { insertContactSkipDuplicate } from './db.js';
+import { getContactSuppressionByEmail, insertContactSkipDuplicate } from './db.js';
 import { emitAnalyticsEvent } from './events/bus.js';
 import {
   type ContactDuplicateSkippedPayload,
@@ -161,6 +161,8 @@ async function processRow(
   seenEmails.add(email);
 
   try {
+    const suppression = await getContactSuppressionByEmail(email).catch(() => null);
+
     // Insert contact, skip if already exists in DB
     const insertedContact = await insertContactSkipDuplicate(
       validation.data.companyName,
@@ -171,6 +173,9 @@ async function processRow(
     if (insertedContact) {
       result.insertedCount++;
       result.successCount++; // Keep for backward compatibility
+      if (suppression) {
+        result.blockedCount++;
+      }
       // Emit contact imported event
       try {
         const event = createEvent<ContactImportedPayload>(DomainEventType.CONTACT_IMPORTED, {
@@ -187,6 +192,9 @@ async function processRow(
       }
     } else {
       result.existingCount++;
+      if (suppression) {
+        result.blockedCount++;
+      }
       // Emit duplicate skipped event for database duplicate
       try {
         const event = createEvent<ContactDuplicateSkippedPayload>(
@@ -232,6 +240,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
     insertedCount: 0,
     skippedCount: 0,
     existingCount: 0,
+    blockedCount: 0,
     errors: [],
   };
 
@@ -305,6 +314,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
       insertedCount: result.insertedCount,
       skippedCount: result.skippedCount,
       existingCount: result.existingCount,
+      blockedCount: result.blockedCount,
     });
 
     // Emit analytics event for imported contacts
@@ -318,7 +328,7 @@ export async function importExcelFile(filePath: string): Promise<ImportResult> {
 
     // Simple console summary
     logger.info(
-      `Import complete: ${result.insertedCount} inserted, ${result.skippedCount} skipped (duplicates in file), ${result.existingCount} existing (already in DB)`
+      `Import complete: ${result.insertedCount} inserted, ${result.blockedCount} blocked, ${result.skippedCount} skipped (duplicates in file), ${result.existingCount} existing (already in DB)`
     );
 
     return result;

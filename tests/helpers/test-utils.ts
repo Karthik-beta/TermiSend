@@ -140,7 +140,17 @@ export interface MockLogger {
   logExcelImportStart: Mock<(filePath: string, totalRows: number) => Promise<void>>;
   logExcelImportRowValid: Mock<(row: number, data: Record<string, unknown>) => Promise<void>>;
   logExcelImportRowInvalid: Mock<(row: number, error: string, data: Record<string, unknown>) => Promise<void>>;
-  logExcelImportComplete: Mock<(result: { totalRows: number; successCount: number; failedCount: number }) => Promise<void>>;
+  logExcelImportComplete: Mock<
+    (result: {
+      totalRows: number;
+      successCount: number;
+      failedCount: number;
+      insertedCount?: number;
+      skippedCount?: number;
+      existingCount?: number;
+      blockedCount?: number;
+    }) => Promise<void>
+  >;
   logApiVerifierRequest: Mock<(email: string) => Promise<void>>;
   logApiVerifierResponse: Mock<(email: string, response: Record<string, unknown>) => Promise<void>>;
   logAwsSesRequest: Mock<(email: string, params: Record<string, unknown>) => Promise<void>>;
@@ -162,7 +172,17 @@ export function createMockLogger(): MockLogger {
     logExcelImportStart: createMockFn<(filePath: string, totalRows: number) => Promise<void>>(),
     logExcelImportRowValid: createMockFn<(row: number, data: Record<string, unknown>) => Promise<void>>(),
     logExcelImportRowInvalid: createMockFn<(row: number, error: string, data: Record<string, unknown>) => Promise<void>>(),
-    logExcelImportComplete: createMockFn<(result: { totalRows: number; successCount: number; failedCount: number }) => Promise<void>>(),
+    logExcelImportComplete: createMockFn<
+      (result: {
+        totalRows: number;
+        successCount: number;
+        failedCount: number;
+        insertedCount?: number;
+        skippedCount?: number;
+        existingCount?: number;
+        blockedCount?: number;
+      }) => Promise<void>
+    >(),
     logApiVerifierRequest: createMockFn<(email: string) => Promise<void>>(),
     logApiVerifierResponse: createMockFn<(email: string, response: Record<string, unknown>) => Promise<void>>(),
     logAwsSesRequest: createMockFn<(email: string, params: Record<string, unknown>) => Promise<void>>(),

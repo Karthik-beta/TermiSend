@@ -507,6 +507,7 @@ export function createMockImportResult(overrides: Partial<ImportResult> = {}): I
     insertedCount: 6,
     skippedCount: 2,
     existingCount: 2,
+    blockedCount: 0,
     errors: [
       { row: 3, error: 'Invalid email format' },
       { row: 7, error: 'Missing company name' },

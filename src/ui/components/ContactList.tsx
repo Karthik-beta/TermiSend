@@ -10,13 +10,13 @@
 /** @jsxImportSource react */
 import { Box, Text } from 'ink';
 import type React from 'react';
-import type { Contact } from '../../types.js';
+import type { ContactWithSuppression } from '../../types.js';
 import { colors, spacing } from '../theme.js';
 import { Panel } from './Panel.js';
 
 interface ContactListProps {
   /** List of contacts to display */
-  contacts: Contact[];
+  contacts: ContactWithSuppression[];
   /** Number of pending contacts */
   pendingCount: number;
   /** Whether data is loading */
@@ -69,12 +69,22 @@ export function ContactList({
               <Box>
                 <Text dimColor={true}>{index + 1}.</Text>
                 <Text> {contact.companyName}</Text>
+                {contact.suppressionType ? (
+                  <Text color={colors.warning}> [BLOCKED]</Text>
+                ) : null}
               </Box>
               <Box paddingLeft={3}>
                 <Text dimColor={true} wrap="truncate-end">
                   {contact.personName} · {contact.email}
                 </Text>
               </Box>
+              {contact.suppressionReason ? (
+                <Box paddingLeft={3}>
+                  <Text color={colors.warning} dimColor={true} wrap="truncate-end">
+                    {contact.suppressionReason}
+                  </Text>
+                </Box>
+              ) : null}
             </Box>
           ))}
           {remainingCount > 0 && (

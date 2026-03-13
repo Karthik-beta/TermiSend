@@ -270,40 +270,30 @@ export async function handleBounceEvent(
       event.data as unknown as Record<string, unknown>
     );
 
-    // Suppress contact for hard bounces (Permanent)
-    let suppressed = false;
-    if (event.data.bounceType === 'Permanent') {
-      const suppressionEmail = sendLog.email || event.recipients[0];
-      await suppressContact(
-        sendLog.contactId,
-        suppressionEmail,
-        `Hard bounce: ${event.data.bounceSubType}`,
-        'bounce'
-      );
-      affectedContactIds.push(sendLog.contactId);
-      suppressed = true;
+    const suppressionEmail = sendLog.email || event.recipients[0];
+    const suppressionReason = `Bounce: ${event.data.bounceType} / ${event.data.bounceSubType}`;
+    await suppressContact(sendLog.contactId, suppressionEmail, suppressionReason, 'bounce');
+    affectedContactIds.push(sendLog.contactId);
+    const suppressed = true;
 
-      // Emit contact suppressed event
-      await persistAnalyticsEvent(
-        createEvent(DomainEventType.CONTACT_SUPPRESSED, {
-          contactId: sendLog.contactId,
-          email: suppressionEmail,
-          messageId: event.messageId,
-          reason: `Hard bounce: ${event.data.bounceSubType}`,
-          suppressionType: 'bounce',
-        })
-      );
-
-      // Emit analytics event
-      emitAnalyticsEvent({
-        type: 'contact:suppressed',
+    await persistAnalyticsEvent(
+      createEvent(DomainEventType.CONTACT_SUPPRESSED, {
         contactId: sendLog.contactId,
         email: suppressionEmail,
-        reason: `Bounce: ${event.data.bounceSubType}`,
-        suppressionType: 'bounce',
         messageId: event.messageId,
-      });
-    }
+        reason: suppressionReason,
+        suppressionType: 'bounce',
+      })
+    );
+
+    emitAnalyticsEvent({
+      type: 'contact:suppressed',
+      contactId: sendLog.contactId,
+      email: suppressionEmail,
+      reason: suppressionReason,
+      suppressionType: 'bounce',
+      messageId: event.messageId,
+    });
 
     // Emit bounce processed event
     await persistAnalyticsEvent(

@@ -464,6 +464,31 @@ describe('Database Integration Tests', () => {
     });
   });
 
+  describe('getContactsWithSuppression()', () => {
+    it('should return suppression metadata for blocked contacts', async () => {
+      if (!dbAvailable || !db) {
+        console.log('Skipping test - database not available');
+        return;
+      }
+
+      const email = `read_model_${Date.now()}@test.com`;
+      await db.createContactSuppression({
+        email,
+        suppressionType: 'bounce',
+        suppressionReason: 'Bounce: Transient / MailboxFull',
+      });
+
+      const contact = await db.insertContact('Read Model Co', 'Blocked Contact', email);
+      const contacts = await db.getContactsWithSuppression();
+      const matched = contacts.find((candidate) => candidate.id === contact.id);
+
+      expect(matched).not.toBeUndefined();
+      expect(matched?.suppressionType).toBe('bounce');
+      expect(matched?.suppressionReason).toBe('Bounce: Transient / MailboxFull');
+      expect(matched?.suppressedAt).toBeInstanceOf(Date);
+    });
+  });
+
   describe('getSendLogByMessageId()', () => {
     it('should find send log by SES message ID', async () => {
       if (!dbAvailable || !db) {

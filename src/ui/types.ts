@@ -9,7 +9,7 @@
 
 import type {
   CampaignResult,
-  Contact,
+  ContactWithSuppression,
   ImportResult,
   SendStatus,
   UnsubscribeResult,
@@ -157,7 +157,7 @@ export interface ActivityEvent {
  * Contact data management state
  */
 export interface ContactsState {
-  contacts: Contact[];
+  contacts: ContactWithSuppression[];
   pendingCount: number;
   isLoading: boolean;
   error: string | null;

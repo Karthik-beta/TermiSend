@@ -15,6 +15,7 @@ import type {
   AnalyticsEventType,
   AuditLog,
   Contact,
+  ContactWithSuppression,
   ContactSuppression,
   EmailVerifierCredits,
   IdentityStatus,
@@ -570,6 +571,32 @@ export async function getContacts(): Promise<Contact[]> {
   return await sql<Contact[]>`
     SELECT * FROM contacts
     ORDER BY created_at DESC
+  `;
+}
+
+/**
+ * Get all contacts enriched with latest suppression metadata for UI display.
+ */
+export async function getContactsWithSuppression(): Promise<ContactWithSuppression[]> {
+  return await sql<ContactWithSuppression[]>`
+    SELECT
+      c.*,
+      suppression.suppression_type as "suppressionType",
+      suppression.suppression_reason as "suppressionReason",
+      suppression.suppressed_at as "suppressedAt"
+    FROM contacts c
+    LEFT JOIN LATERAL (
+      SELECT
+        cs.suppression_type,
+        cs.suppression_reason,
+        cs.suppressed_at
+      FROM contact_suppressions cs
+      WHERE cs.contact_id = c.id
+         OR (cs.email IS NOT NULL AND LOWER(cs.email) = LOWER(c.email))
+      ORDER BY cs.suppressed_at DESC
+      LIMIT 1
+    ) suppression ON true
+    ORDER BY c.created_at DESC
   `;
 }
 

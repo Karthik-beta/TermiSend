@@ -22,6 +22,15 @@ export interface Contact {
 }
 
 /**
+ * Contact record enriched with suppression metadata for UI display.
+ */
+export interface ContactWithSuppression extends Contact {
+  suppressionType: SuppressionType | null;
+  suppressionReason: string | null;
+  suppressedAt: Date | null;
+}
+
+/**
  * Supported suppression reasons that block future sends
  */
 export type SuppressionType = 'bounce' | 'complaint' | 'unsubscribe' | 'manual';
@@ -199,6 +208,7 @@ export interface ImportResult {
   insertedCount: number; // New contacts inserted into DB
   skippedCount: number; // Duplicates within the same file
   existingCount: number; // Contacts already existing in DB
+  blockedCount: number; // Suppressed contacts that remain permanently unsendable
   errors: Array<{ row: number; error: string }>;
 }
 

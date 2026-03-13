@@ -306,18 +306,23 @@ describe('SES Event Handlers Module', () => {
       expect(dbModule.suppressContact).toHaveBeenCalledWith(
         mockSendLog.contactId,
         mockSendLog.email,
-        expect.stringContaining('Hard bounce'),
+        'Bounce: Permanent / General',
         'bounce'
       );
     });
 
-    it('should NOT suppress contact for soft bounces', async () => {
+    it('should suppress contact for soft bounces', async () => {
       const event = createParsedBounceEvent('Transient');
       const result = await handleBounceEvent(event);
 
       expect(result.success).toBe(true);
-      expect(result.affectedContactIds).toHaveLength(0);
-      expect(dbModule.suppressContact).not.toHaveBeenCalled();
+      expect(result.affectedContactIds).toContain(mockSendLog.contactId);
+      expect(dbModule.suppressContact).toHaveBeenCalledWith(
+        mockSendLog.contactId,
+        mockSendLog.email,
+        'Bounce: Transient / MailboxFull',
+        'bounce'
+      );
     });
 
     it('should return success when send log not found (graceful degradation)', async () => {
@@ -343,8 +348,23 @@ describe('SES Event Handlers Module', () => {
       );
     });
 
-    it('should emit contact:suppressed analytics event for hard bounce', async () => {
-      const event = createParsedBounceEvent('Permanent');
+    it('should persist bounce analytics with suppressed true for transient bounces', async () => {
+      const event = createParsedBounceEvent('Transient');
+      await handleBounceEvent(event);
+
+      expect(dbModule.recordAnalyticsEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: 'SES_BOUNCE_PROCESSED',
+          payload: expect.objectContaining({
+            bounceType: 'Transient',
+            suppressed: true,
+          }),
+        })
+      );
+    });
+
+    it('should emit contact:suppressed analytics event for bounced contacts', async () => {
+      const event = createParsedBounceEvent('Transient');
       await handleBounceEvent(event);
 
       expect(eventsBusModule.emitAnalyticsEvent).toHaveBeenCalledWith(
@@ -352,6 +372,7 @@ describe('SES Event Handlers Module', () => {
           type: 'contact:suppressed',
           contactId: mockSendLog.contactId,
           email: mockSendLog.email,
+          reason: 'Bounce: Transient / MailboxFull',
           suppressionType: 'bounce',
         })
       );
