@@ -4,6 +4,9 @@
  */
 
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   getAnalyticsConfig,
   getAnalyticsRateLimitMs,
@@ -112,6 +115,29 @@ describe('Configuration Module', () => {
   // ============================================================================
 
   describe('loadEnv()', () => {
+    it('should resolve env files using the current NODE_ENV at call time', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'termisend-config-'));
+      const originalCwd = process.cwd();
+
+      try {
+        writeFileSync(join(tempDir, '.env.development'), 'EMAIL_VERIFICATION_POLICY=permissive\n');
+        writeFileSync(join(tempDir, '.env.production'), 'EMAIL_VERIFICATION_POLICY=strict\n');
+
+        process.chdir(tempDir);
+
+        process.env.NODE_ENV = 'production';
+        resetEnvCacheForTesting();
+        expect(loadEnv().EMAIL_VERIFICATION_POLICY).toBe('strict');
+
+        process.env.NODE_ENV = 'development';
+        resetEnvCacheForTesting();
+        expect(loadEnv().EMAIL_VERIFICATION_POLICY).toBe('permissive');
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('should load environment variables from development file when NODE_ENV is not production', () => {
       // Arrange
       delete process.env.NODE_ENV;

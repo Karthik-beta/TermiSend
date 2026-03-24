@@ -12,7 +12,19 @@ import { validateTemplatePath } from './path-validator.js';
 // Environment Configuration
 // ============================================================================
 
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env.development';
+function getEnvFileCandidates(): string[] {
+  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+
+  if (nodeEnv === 'production') {
+    return ['.env.production', '.env.prod'];
+  }
+
+  if (!nodeEnv || nodeEnv === 'development') {
+    return ['.env.development', '.env'];
+  }
+
+  return [`.env.${nodeEnv}`, '.env.development', '.env'];
+}
 
 /**
  * Load environment variables from the appropriate .env file
@@ -20,27 +32,31 @@ const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.en
  * @returns Record of environment variables
  */
 export function loadEnv(): Record<string, string> {
-  try {
-    // Check if env file exists first
-    const envPath = resolve(process.cwd(), envFile);
-    readFileSync(envPath, 'utf-8');
+  for (const envFile of getEnvFileCandidates()) {
+    try {
+      // Check if env file exists first
+      const envPath = resolve(process.cwd(), envFile);
+      readFileSync(envPath, 'utf-8');
 
-    // Load using dotenv
-    const result = config({ path: envPath });
+      // Load using dotenv
+      const result = config({ path: envPath });
 
-    if (result.error) {
-      console.warn(`⚠️  Could not load ${envFile}`);
-      console.warn('   This is optional - using existing environment variables');
-      console.warn(`   To create: cp .env.example ${envFile}`);
-      return {};
+      if (result.error) {
+        console.warn(`⚠️  Could not load ${envFile}`);
+        console.warn('   This is optional - using existing environment variables');
+        console.warn(`   To create: cp .env.example ${envFile}`);
+        return {};
+      }
+
+      // Return parsed environment variables
+      return result.parsed || {};
+    } catch {
+      // Try the next matching env file name
     }
-
-    // Return parsed environment variables
-    return result.parsed || {};
-  } catch {
-    // File doesn't exist or can't be read
-    return {};
   }
+
+  // No matching env file exists or could be read
+  return {};
 }
 
 // Cache for loaded environment - immutable after initialization

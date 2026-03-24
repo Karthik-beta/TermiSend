@@ -23,6 +23,7 @@ const mockSqlFn = Object.assign(
     return Promise.resolve<unknown[]>([]);
   }) as Mock<(strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>>,
   {
+    begin: async <T>(callback: (tx: typeof mockSqlFn) => Promise<T>) => callback(mockSqlFn),
     json: (data: unknown) => JSON.stringify(data),
     end: () => Promise.resolve(),
   }
@@ -85,6 +86,7 @@ const {
   getLatestQuotaSnapshot,
   createSendStatistics,
   getSendStatistics,
+  getPeriodicAnalytics,
   upsertIdentityStatus,
   getIdentityStatuses,
   createMessageEvent,
@@ -102,6 +104,101 @@ describe('Database Analytics Functions', () => {
     mockSqlFn.mockClear();
     resetSqlClient();
     return () => restoreConsole();
+  });
+
+  describe('getPeriodicAnalytics()', () => {
+    it('should derive period-specific fallback values from send logs instead of reusing totals', async () => {
+      mockSqlFn
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            {
+              daily_sent: 4,
+              daily_delivered: 3,
+              daily_opened: 1,
+              daily_clicked: 1,
+              daily_total_opens: 2,
+              daily_total_clicks: 1,
+              daily_failed: 1,
+              daily_bounced: 0,
+              daily_complained: 0,
+              weekly_sent: 12,
+              weekly_delivered: 9,
+              weekly_opened: 5,
+              weekly_clicked: 2,
+              weekly_total_opens: 8,
+              weekly_total_clicks: 3,
+              weekly_failed: 2,
+              weekly_bounced: 1,
+              weekly_complained: 0,
+              monthly_sent: 27,
+              monthly_delivered: 21,
+              monthly_opened: 9,
+              monthly_clicked: 4,
+              monthly_total_opens: 16,
+              monthly_total_clicks: 5,
+              monthly_failed: 4,
+              monthly_bounced: 2,
+              monthly_complained: 1,
+            },
+          ])
+        );
+
+      const result = await getPeriodicAnalytics();
+
+      expect(result.daily.sent).toBe(4);
+      expect(result.weekly.sent).toBe(12);
+      expect(result.monthly.sent).toBe(27);
+      expect(result.daily.delivered).toBe(3);
+      expect(result.weekly.totalOpens).toBe(8);
+      expect(result.monthly.totalClicks).toBe(5);
+      expect(result.monthly.complained).toBe(1);
+    });
+
+    it('should keep aggregate totals visible across periods when no window timestamps are available', async () => {
+      mockSqlFn
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{}]))
+        .mockImplementationOnce(() => Promise.resolve([{ count: '552' }]))
+        .mockImplementationOnce(() => Promise.resolve([{ count: '0' }]))
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            {
+              sent: 487,
+              failed: 65,
+              bounced: 130,
+              complained: 0,
+            },
+          ])
+        )
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            {
+              verified: 400,
+              invalid: 225,
+            },
+          ])
+        );
+
+      const result = await getPeriodicAnalytics();
+
+      expect(result.daily.sent).toBe(487);
+      expect(result.weekly.sent).toBe(487);
+      expect(result.monthly.sent).toBe(487);
+      expect(result.daily.failed).toBe(65);
+      expect(result.weekly.failed).toBe(65);
+      expect(result.monthly.failed).toBe(65);
+      expect(result.daily.invalid).toBe(225);
+      expect(result.weekly.invalid).toBe(225);
+      expect(result.monthly.invalid).toBe(225);
+      expect(result.monthly.bounced).toBe(130);
+    });
   });
 
   // ============================================================================

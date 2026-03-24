@@ -24,8 +24,9 @@ import { restoreEnv, setMockEnv } from '../helpers/test-utils.js';
 
 describe('Verifier Module', () => {
   beforeEach(() => {
-    resetEnvCacheForTesting();
     restoreEnv();
+    setMockEnv({ EMAIL_VERIFICATION_POLICY: 'balanced' });
+    resetEnvCacheForTesting();
   });
 
   describe('isEmailSafe()', () => {

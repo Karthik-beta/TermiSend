@@ -5,9 +5,9 @@
   "type": "module",
   "main": "src/index.tsx",
   "scripts": {
-    "start": "bun run src/index.tsx",
-    "dev": "NODE_ENV=development bun run src/index.tsx",
-    "prod": "NODE_ENV=production bun run src/index.tsx",
+    "start": "bun --env-file=.env.development run src/index.tsx",
+    "dev": "bun --env-file=.env.development run src/index.tsx",
+    "prod": "bun --env-file=.env.production run src/index.tsx",
     "build": "bun build ./src/index.tsx --outdir ./dist --target=bun",
     "shortcut:create": "bun run scripts/create-windows-shortcut.ts",
     "db:init": "bun run src/db.ts",

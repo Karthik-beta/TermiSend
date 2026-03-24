@@ -739,10 +739,10 @@ export async function updateSendLog(
     UPDATE send_logs
     SET 
       status = ${updates.status},
-      message_id = ${updates.messageId ?? null},
-      error_reason = ${updates.errorReason ?? null},
-      sent_at = ${updates.sentAt ?? null},
-      retry_count = ${updates.retryCount ?? null}
+      message_id = COALESCE(${updates.messageId ?? null}, message_id),
+      error_reason = COALESCE(${updates.errorReason ?? null}, error_reason),
+      sent_at = COALESCE(${updates.sentAt ?? null}, sent_at),
+      retry_count = COALESCE(${updates.retryCount ?? null}, retry_count)
     WHERE id = ${logId}
     RETURNING *
   `;
@@ -1113,242 +1113,127 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
     SELECT
       SUM(
         CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'EMAIL_SENT'
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
           THEN 1
           ELSE 0
         END
       ) as daily_sent,
       SUM(
         CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'SES_DELIVERY_CONFIRMED'
+          WHEN delivery_confirmed_at IS NOT NULL
+            AND (delivery_confirmed_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'delivered'
           THEN 1
           ELSE 0
         END
       ) as daily_delivered,
       SUM(
         CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'EMAIL_FAILED'
+          WHEN (created_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'failed'
           THEN 1
           ELSE 0
         END
       ) as daily_failed,
       SUM(
         CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'CONTACT_VERIFIED'
-            AND payload->>'result' = 'valid'
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_verified,
-      SUM(
-        CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND (
-              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
-              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
-            )
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_invalid,
-      SUM(
-        CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'SES_BOUNCE_PROCESSED'
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'bounced'
           THEN 1
           ELSE 0
         END
       ) as daily_bounced,
       SUM(
         CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Permanent'
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_hard_bounced,
-      SUM(
-        CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Transient'
-          THEN 1
-          ELSE 0
-        END
-      ) as daily_soft_bounced,
-      SUM(
-        CASE
-          WHEN (occurred_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-            AND event_type = 'SES_COMPLAINT_PROCESSED'
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'complained'
           THEN 1
           ELSE 0
         END
       ) as daily_complained,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days' AND event_type = 'EMAIL_SENT'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
           THEN 1
           ELSE 0
         END
       ) as weekly_sent,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days' AND event_type = 'SES_DELIVERY_CONFIRMED'
+          WHEN delivery_confirmed_at >= NOW() - INTERVAL '7 days'
+            AND status = 'delivered'
           THEN 1
           ELSE 0
         END
       ) as weekly_delivered,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days' AND event_type = 'EMAIL_FAILED'
+          WHEN created_at >= NOW() - INTERVAL '7 days'
+            AND status = 'failed'
           THEN 1
           ELSE 0
         END
       ) as weekly_failed,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = 'CONTACT_VERIFIED'
-            AND payload->>'result' = 'valid'
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_verified,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND (
-              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
-              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
-            )
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_invalid,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days' AND event_type = 'SES_BOUNCE_PROCESSED'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status = 'bounced'
           THEN 1
           ELSE 0
         END
       ) as weekly_bounced,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Permanent'
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_hard_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days'
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Transient'
-          THEN 1
-          ELSE 0
-        END
-      ) as weekly_soft_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '7 days' AND event_type = 'SES_COMPLAINT_PROCESSED'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status = 'complained'
           THEN 1
           ELSE 0
         END
       ) as weekly_complained,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days' AND event_type = 'EMAIL_SENT'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
           THEN 1
           ELSE 0
         END
       ) as monthly_sent,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days' AND event_type = 'SES_DELIVERY_CONFIRMED'
+          WHEN delivery_confirmed_at >= NOW() - INTERVAL '30 days'
+            AND status = 'delivered'
           THEN 1
           ELSE 0
         END
       ) as monthly_delivered,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days' AND event_type = 'EMAIL_FAILED'
+          WHEN created_at >= NOW() - INTERVAL '30 days'
+            AND status = 'failed'
           THEN 1
           ELSE 0
         END
       ) as monthly_failed,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = 'CONTACT_VERIFIED'
-            AND payload->>'result' = 'valid'
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_verified,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND (
-              event_type IN ('CONTACT_INVALID', 'CONTACT_DEEMED_UNSAFE')
-              OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' = 'invalid')
-            )
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_invalid,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days' AND event_type = 'SES_BOUNCE_PROCESSED'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status = 'bounced'
           THEN 1
           ELSE 0
         END
       ) as monthly_bounced,
       SUM(
         CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Permanent'
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_hard_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days'
-            AND event_type = 'SES_BOUNCE_PROCESSED'
-            AND payload->>'bounceType' = 'Transient'
-          THEN 1
-          ELSE 0
-        END
-      ) as monthly_soft_bounced,
-      SUM(
-        CASE
-          WHEN occurred_at >= NOW() - INTERVAL '30 days' AND event_type = 'SES_COMPLAINT_PROCESSED'
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status = 'complained'
           THEN 1
           ELSE 0
         END
       ) as monthly_complained
-    FROM analytics_events
-    WHERE occurred_at >= NOW() - INTERVAL '30 days'
-      AND (
-        event_type IN (
-          'EMAIL_SENT',
-          'EMAIL_FAILED',
-          'CONTACT_INVALID',
-          'CONTACT_DEEMED_UNSAFE',
-          'SES_DELIVERY_CONFIRMED',
-          'SES_BOUNCE_PROCESSED',
-          'SES_COMPLAINT_PROCESSED'
-        )
-        OR (event_type = 'CONTACT_VERIFIED' AND payload->>'result' IN ('valid', 'invalid'))
-      )
+    FROM send_logs
+    WHERE COALESCE(sent_at, delivery_confirmed_at, created_at) >= NOW() - INTERVAL '30 days'
   `;
   const qualityResult = await sql<Record<string, string | number | null>[]>`
     WITH period_contacts AS (
@@ -1534,71 +1419,335 @@ export async function getPeriodicAnalytics(): Promise<PeriodicAnalytics> {
     return periodic;
   }
 
-  // Fallback: if windowed queries are empty but DB has aggregate analytics counts,
-  // surface those counts to avoid blank analytics panels.
-  const aggregate = await getAnalyticsCounts();
-  const hasAggregateData =
-    aggregate.sent > 0 ||
-    aggregate.failed > 0 ||
-    aggregate.verified > 0 ||
-    aggregate.invalid > 0 ||
-    aggregate.bounced > 0 ||
-    aggregate.complained > 0;
+  // Fallback: derive time-windowed metrics from send_logs timestamps instead of
+  // repeating all-time aggregate totals in every period column.
+  const [sendLogFallbackRow = {}] = await sql<Record<string, string | number | null>[]>`
+    SELECT
+      SUM(
+        CASE
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_sent,
+      SUM(
+        CASE
+          WHEN delivery_confirmed_at IS NOT NULL
+            AND (delivery_confirmed_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'delivered'
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_delivered,
+      SUM(
+        CASE
+          WHEN first_opened_at IS NOT NULL
+            AND (first_opened_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_opened,
+      SUM(
+        CASE
+          WHEN first_clicked_at IS NOT NULL
+            AND (first_clicked_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_clicked,
+      SUM(
+        CASE
+          WHEN first_opened_at IS NOT NULL
+            AND (first_opened_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          THEN GREATEST(COALESCE(open_count, 0), 1)
+          ELSE 0
+        END
+      ) as daily_total_opens,
+      SUM(
+        CASE
+          WHEN first_clicked_at IS NOT NULL
+            AND (first_clicked_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          THEN GREATEST(COALESCE(click_count, 0), 1)
+          ELSE 0
+        END
+      ) as daily_total_clicks,
+      SUM(
+        CASE
+          WHEN (created_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'failed'
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_failed,
+      SUM(
+        CASE
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'bounced'
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_bounced,
+      SUM(
+        CASE
+          WHEN (COALESCE(sent_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND status = 'complained'
+          THEN 1
+          ELSE 0
+        END
+      ) as daily_complained,
 
-  if (!hasAggregateData) {
-    return periodic;
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_sent,
+      SUM(
+        CASE
+          WHEN delivery_confirmed_at >= NOW() - INTERVAL '7 days'
+            AND status = 'delivered'
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_delivered,
+      SUM(CASE WHEN first_opened_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END) as weekly_opened,
+      SUM(CASE WHEN first_clicked_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END) as weekly_clicked,
+      SUM(
+        CASE
+          WHEN first_opened_at >= NOW() - INTERVAL '7 days'
+          THEN GREATEST(COALESCE(open_count, 0), 1)
+          ELSE 0
+        END
+      ) as weekly_total_opens,
+      SUM(
+        CASE
+          WHEN first_clicked_at >= NOW() - INTERVAL '7 days'
+          THEN GREATEST(COALESCE(click_count, 0), 1)
+          ELSE 0
+        END
+      ) as weekly_total_clicks,
+      SUM(
+        CASE
+          WHEN created_at >= NOW() - INTERVAL '7 days'
+            AND status = 'failed'
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_failed,
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status = 'bounced'
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_bounced,
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '7 days'
+            AND status = 'complained'
+          THEN 1
+          ELSE 0
+        END
+      ) as weekly_complained,
+
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status IN ('sent', 'delivered', 'bounced', 'complained')
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_sent,
+      SUM(
+        CASE
+          WHEN delivery_confirmed_at >= NOW() - INTERVAL '30 days'
+            AND status = 'delivered'
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_delivered,
+      SUM(CASE WHEN first_opened_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END) as monthly_opened,
+      SUM(CASE WHEN first_clicked_at >= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END) as monthly_clicked,
+      SUM(
+        CASE
+          WHEN first_opened_at >= NOW() - INTERVAL '30 days'
+          THEN GREATEST(COALESCE(open_count, 0), 1)
+          ELSE 0
+        END
+      ) as monthly_total_opens,
+      SUM(
+        CASE
+          WHEN first_clicked_at >= NOW() - INTERVAL '30 days'
+          THEN GREATEST(COALESCE(click_count, 0), 1)
+          ELSE 0
+        END
+      ) as monthly_total_clicks,
+      SUM(
+        CASE
+          WHEN created_at >= NOW() - INTERVAL '30 days'
+            AND status = 'failed'
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_failed,
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status = 'bounced'
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_bounced,
+      SUM(
+        CASE
+          WHEN COALESCE(sent_at, created_at) >= NOW() - INTERVAL '30 days'
+            AND status = 'complained'
+          THEN 1
+          ELSE 0
+        END
+      ) as monthly_complained
+    FROM send_logs
+    WHERE COALESCE(sent_at, delivery_confirmed_at, first_opened_at, first_clicked_at, created_at) >= NOW() - INTERVAL '30 days'
+       OR created_at >= NOW() - INTERVAL '30 days'
+  `;
+
+  const hasFallbackData =
+    Number(sendLogFallbackRow.daily_sent || 0) > 0 ||
+    Number(sendLogFallbackRow.daily_delivered || 0) > 0 ||
+    Number(sendLogFallbackRow.daily_failed || 0) > 0 ||
+    Number(sendLogFallbackRow.daily_bounced || 0) > 0 ||
+    Number(sendLogFallbackRow.weekly_sent || 0) > 0 ||
+    Number(sendLogFallbackRow.weekly_delivered || 0) > 0 ||
+    Number(sendLogFallbackRow.weekly_failed || 0) > 0 ||
+    Number(sendLogFallbackRow.weekly_bounced || 0) > 0 ||
+    Number(sendLogFallbackRow.monthly_sent || 0) > 0 ||
+    Number(sendLogFallbackRow.monthly_delivered || 0) > 0 ||
+    Number(sendLogFallbackRow.monthly_failed || 0) > 0 ||
+    Number(sendLogFallbackRow.monthly_bounced || 0) > 0;
+
+  if (!hasFallbackData) {
+    const aggregate = await getAnalyticsCounts();
+    const hasAggregateData =
+      aggregate.sent > 0 ||
+      aggregate.failed > 0 ||
+      aggregate.verified > 0 ||
+      aggregate.invalid > 0 ||
+      aggregate.bounced > 0 ||
+      aggregate.complained > 0;
+
+    if (!hasAggregateData) {
+      return periodic;
+    }
+
+    return {
+      daily: {
+        period: 'daily',
+        sent: aggregate.sent,
+        delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
+        opened: 0,
+        clicked: 0,
+        totalOpens: 0,
+        totalClicks: 0,
+        failed: aggregate.failed,
+        verified: aggregate.verified,
+        invalid: aggregate.invalid,
+        bounced: aggregate.bounced,
+        hardBounced: 0,
+        softBounced: 0,
+        complained: aggregate.complained,
+        averageDeliveryTimeMs: 0,
+      },
+      weekly: {
+        period: 'weekly',
+        sent: aggregate.sent,
+        delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
+        opened: 0,
+        clicked: 0,
+        totalOpens: 0,
+        totalClicks: 0,
+        failed: aggregate.failed,
+        verified: aggregate.verified,
+        invalid: aggregate.invalid,
+        bounced: aggregate.bounced,
+        hardBounced: 0,
+        softBounced: 0,
+        complained: aggregate.complained,
+        averageDeliveryTimeMs: 0,
+      },
+      monthly: {
+        period: 'monthly',
+        sent: aggregate.sent,
+        delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
+        opened: 0,
+        clicked: 0,
+        totalOpens: 0,
+        totalClicks: 0,
+        failed: aggregate.failed,
+        verified: aggregate.verified,
+        invalid: aggregate.invalid,
+        bounced: aggregate.bounced,
+        hardBounced: 0,
+        softBounced: 0,
+        complained: aggregate.complained,
+        averageDeliveryTimeMs: 0,
+      },
+    };
   }
 
   return {
     daily: {
       period: 'daily',
-      sent: aggregate.sent,
-      delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
-      opened: 0,
-      clicked: 0,
-      totalOpens: 0,
-      totalClicks: 0,
-      failed: aggregate.failed,
-      verified: aggregate.verified,
-      invalid: aggregate.invalid,
-      bounced: aggregate.bounced,
+      sent: Number(sendLogFallbackRow.daily_sent || 0),
+      delivered: Number(sendLogFallbackRow.daily_delivered || 0),
+      opened: Number(sendLogFallbackRow.daily_opened || 0),
+      clicked: Number(sendLogFallbackRow.daily_clicked || 0),
+      totalOpens: Number(sendLogFallbackRow.daily_total_opens || 0),
+      totalClicks: Number(sendLogFallbackRow.daily_total_clicks || 0),
+      failed: Number(sendLogFallbackRow.daily_failed || 0),
+      verified: periodic.daily.verified,
+      invalid: periodic.daily.invalid,
+      bounced: Number(sendLogFallbackRow.daily_bounced || 0),
       hardBounced: 0,
       softBounced: 0,
-      complained: aggregate.complained,
+      complained: Number(sendLogFallbackRow.daily_complained || 0),
       averageDeliveryTimeMs: 0,
     },
     weekly: {
       period: 'weekly',
-      sent: aggregate.sent,
-      delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
-      opened: 0,
-      clicked: 0,
-      totalOpens: 0,
-      totalClicks: 0,
-      failed: aggregate.failed,
-      verified: aggregate.verified,
-      invalid: aggregate.invalid,
-      bounced: aggregate.bounced,
+      sent: Number(sendLogFallbackRow.weekly_sent || 0),
+      delivered: Number(sendLogFallbackRow.weekly_delivered || 0),
+      opened: Number(sendLogFallbackRow.weekly_opened || 0),
+      clicked: Number(sendLogFallbackRow.weekly_clicked || 0),
+      totalOpens: Number(sendLogFallbackRow.weekly_total_opens || 0),
+      totalClicks: Number(sendLogFallbackRow.weekly_total_clicks || 0),
+      failed: Number(sendLogFallbackRow.weekly_failed || 0),
+      verified: periodic.weekly.verified,
+      invalid: periodic.weekly.invalid,
+      bounced: Number(sendLogFallbackRow.weekly_bounced || 0),
       hardBounced: 0,
       softBounced: 0,
-      complained: aggregate.complained,
+      complained: Number(sendLogFallbackRow.weekly_complained || 0),
       averageDeliveryTimeMs: 0,
     },
     monthly: {
       period: 'monthly',
-      sent: aggregate.sent,
-      delivered: Math.max(aggregate.sent - aggregate.bounced, 0),
-      opened: 0,
-      clicked: 0,
-      totalOpens: 0,
-      totalClicks: 0,
-      failed: aggregate.failed,
-      verified: aggregate.verified,
-      invalid: aggregate.invalid,
-      bounced: aggregate.bounced,
+      sent: Number(sendLogFallbackRow.monthly_sent || 0),
+      delivered: Number(sendLogFallbackRow.monthly_delivered || 0),
+      opened: Number(sendLogFallbackRow.monthly_opened || 0),
+      clicked: Number(sendLogFallbackRow.monthly_clicked || 0),
+      totalOpens: Number(sendLogFallbackRow.monthly_total_opens || 0),
+      totalClicks: Number(sendLogFallbackRow.monthly_total_clicks || 0),
+      failed: Number(sendLogFallbackRow.monthly_failed || 0),
+      verified: periodic.monthly.verified,
+      invalid: periodic.monthly.invalid,
+      bounced: Number(sendLogFallbackRow.monthly_bounced || 0),
       hardBounced: 0,
       softBounced: 0,
-      complained: aggregate.complained,
+      complained: Number(sendLogFallbackRow.monthly_complained || 0),
       averageDeliveryTimeMs: 0,
     },
   };
